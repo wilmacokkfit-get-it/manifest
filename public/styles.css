@@ -55,7 +55,7 @@ main{position:relative;z-index:2;min-height:100vh}
 .forming-name{position:absolute;z-index:2;font-family:var(--serif);font-weight:500;font-size:clamp(28px,5vw,46px);letter-spacing:.01em;text-align:center;padding:0 10%;opacity:0;transition:opacity .6s}
 .orb-wrap.forming .forming-name{opacity:1}
 .forming-status{margin-top:40px;font-family:var(--serif);font-style:italic;font-size:15px;color:var(--fg-50);min-height:1.6em;transition:opacity .4s}
-.hero-tag{margin-top:44px;font-family:var(--serif);font-style:italic;font-size:15.5px;color:var(--fg-50);max-width:420px}
+.hero-tag{margin-top:44px;font-family:var(--serif);font-style:italic;font-size:15.5px;color:var(--fg-50);max-width:480px;text-wrap:balance}
 .hero-error{margin-top:20px;color:#ffb8b8;font-size:13.5px;max-width:460px}
 
 .section{max-width:var(--max);margin:0 auto;padding:140px 24px}
@@ -202,6 +202,7 @@ footer a{color:var(--fg-50)}
 .card .tag{font-family:var(--serif);font-style:italic;color:var(--fg-50);font-size:13px;line-height:1.5;min-height:2.6em}
 .card .meta{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:12px;border-top:1px solid var(--line-soft);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-30)}
 .card .meta b{font-weight:400;color:var(--accent)}
+.cards .empty{grid-column: 1 / -1}
 .empty{text-align:center;color:var(--fg-30);padding:60px 0;font-family:var(--serif);font-style:italic;font-size:16px}
 .empty a{color:var(--accent)}
 
@@ -231,6 +232,7 @@ footer a{color:var(--fg-50)}
   .ground{border-right:0;border-bottom:1px solid var(--line-soft)} .ground:last-child{border-bottom:0}
 }
 @media (max-width:640px){
+  .v-prov-when{display:block;margin-top:6px}
   .nav{padding:18px 20px} .nav-links{gap:18px} .nav-links a{font-size:10.5px}
   .logo{font-size:15px;letter-spacing:.14em}
   .orb-wrap{width:82vw}

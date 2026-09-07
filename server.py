@@ -44,7 +44,16 @@ store = build_store()
 app = FastAPI(title="MANIFEST", docs_url=None, redoc_url=None)
 
 PUBLIC = ROOT / "public"
-INDEX_HTML = (PUBLIC / "index.html").read_text()
+_index_cache: dict = {"mtime": 0.0, "html": ""}
+
+
+def _index_html() -> str:
+    """Read index.html, re-reading only when the file changes on disk."""
+    path = PUBLIC / "index.html"
+    mtime = path.stat().st_mtime
+    if mtime != _index_cache["mtime"]:
+        _index_cache.update(mtime=mtime, html=path.read_text())
+    return _index_cache["html"]
 
 # ---------------------------------------------------------------------------
 # Config
@@ -203,7 +212,6 @@ async def manifest(body: ManifestBody, request: Request):
     owner = _owner_token(request)
     created_at = now_iso()
     prov = mint(idea, created_at, owner)
-    _record_hit(caller)
 
     async def gen():
         yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at})
@@ -231,6 +239,7 @@ async def manifest(body: ManifestBody, request: Request):
                 "visibility": "private", "status": "ready",
             }
             saved = await store.create_venture(row)
+            _record_hit(caller)  # only successful births count against the limit
             if saved["images_status"] == "pending":
                 asyncio.create_task(_render_images(saved))
             yield _sse("done", _public_view(saved, is_owner=True))
@@ -380,7 +389,7 @@ def _shell(og: dict | None = None) -> str:
         f'<meta name="twitter:description" content="{html.escape(desc)}">',
         f'<meta name="twitter:image" content="{html.escape(image)}">',
     ])
-    page = INDEX_HTML.replace("<!--OG-->", tags).replace("<!--BASE-->", '<base href="/">')
+    page = _index_html().replace("<!--OG-->", tags).replace("<!--BASE-->", '<base href="/">')
     return page.replace("<!--SERVED-->", '<script>window.__MANIFEST_SERVED__=true;</script>')
 
 

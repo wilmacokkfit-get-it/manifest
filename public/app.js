@@ -340,7 +340,7 @@
       update({ ...v, image_prompts: true }, null);
       [tagline, desc, ...Object.values(gEls)].forEach(el => el.classList.remove('caret'));
       root.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
-      prov.replaceChildren('Provenance ', h('b', { text: v.provenance.code }), ' · minted ', fmtDate(v.provenance.minted_at));
+      prov.replaceChildren('Provenance ', h('b', { text: v.provenance.code }), h('span', { class: 'v-prov-when' }, ' · minted ', fmtDate(v.provenance.minted_at)));
       sealCode.textContent = v.provenance.code;
       sealWhen.textContent = `Minted ${fmtDate(v.provenance.minted_at, true)}`;
       sealHash.textContent = v.provenance.hash;
@@ -360,7 +360,8 @@
         img.onload = () => { img.classList.add('on'); slot.classList.add('done'); };
         img.src = assetUrl(u);
       });
-      if (v.images_status === 'ready') renderStatus.classList.add('hidden');
+      const allIn = (v.images || []).filter(Boolean).length >= renderSlots.length;
+      if (v.images_status === 'ready' || allIn) renderStatus.classList.add('hidden');
       else if (v.images_status === 'failed') {
         renderStatus.textContent = (v.images || []).some(Boolean) ? '' : 'Renders unavailable for this one.';
         renderSlots.forEach(s => { if (!s.classList.contains('done')) s.classList.add('done'); });
@@ -474,14 +475,14 @@
     }
 
     function renderActions(v) {
-      actions.replaceChildren(
+      actions.replaceChildren(...[
         v.visibility === 'public' ? copyBtn(v, 'Copy share link') : null,
         h('button', { class: 'btn', text: 'Copy summary', onclick: async () => {
           const t = `${v.name}\n${v.tagline}\n\n${v.description}\n\nProvenance ${v.provenance.code}\n${shareUrl(v.slug)}`;
           try { await navigator.clipboard.writeText(t); toast('Summary copied.'); } catch (_) { toast('Could not copy on this device.'); }
         } }),
         h('a', { class: 'btn ghost', href: href('/'), 'data-route': '/', text: 'Manifest another' }),
-      );
+      ].filter(Boolean));
       show(actions);
     }
 

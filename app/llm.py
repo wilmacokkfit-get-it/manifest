@@ -83,11 +83,9 @@ async def _stream_anthropic(idea: str) -> AsyncIterator[str]:
         max_tokens=2200,
         system=SYSTEM_PROMPT,
         messages=[
-            {"role": "user", "content": f"The sentence:\n\n{idea}\n\nReturn the JSON object now."},
-            {"role": "assistant", "content": "{"},
+            {"role": "user", "content": f"The sentence:\n\n{idea}\n\nReturn the JSON object now. Start with {{ and end with }}. No prose, no code fences."},
         ],
     ) as stream:
-        yield "{"
         async for text in stream.text_stream:
             yield text
 
@@ -176,7 +174,7 @@ async def generate_render(prompt: str, accent: str = "#e8eeff") -> bytes | None:
     if provider == "pplx":
         from .generate_image import generate_image  # sandbox-only helper
 
-        return await generate_image(prompt, aspect_ratio="1:1", model=os.environ.get("IMAGE_MODEL", "gpt_image_2"))
+        return await generate_image(prompt, aspect_ratio="1:1", model=os.environ.get("IMAGE_MODEL", "nano_banana_2"))
     if provider == "mock":
         await asyncio.sleep(1.2)
         return _mock_png(accent, seed=hash(prompt) & 0xFFFF)
