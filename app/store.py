@@ -38,6 +38,21 @@ VENTURE_COLUMNS = [
 ]
 
 
+def compress_render(data: bytes, max_side: int = 1280, quality: int = 82) -> tuple[bytes, str, str]:
+    """Shrink a generated PNG to a web-sized WebP. Falls back to the original
+    bytes if Pillow is missing or the image can't be decoded."""
+    try:
+        from io import BytesIO
+        from PIL import Image
+        im = Image.open(BytesIO(data)).convert("RGB")
+        im.thumbnail((max_side, max_side))
+        out = BytesIO()
+        im.save(out, "WEBP", quality=quality, method=5)
+        return out.getvalue(), "webp", "image/webp"
+    except Exception:
+        return data, "png", "image/png"
+
+
 def _new_id() -> str:
     return str(uuid.uuid4())
 
@@ -221,8 +236,9 @@ class SQLiteStore:
 
     # -- renders ------------------------------------------------------------
     async def save_render(self, venture_id: str, idx: int, png: bytes) -> str:
-        path = self.renders_dir / f"{venture_id}-{idx}.png"
-        await asyncio.to_thread(path.write_bytes, png)
+        data, ext, _ = await asyncio.to_thread(compress_render, png)
+        path = self.renders_dir / f"{venture_id}-{idx}.{ext}"
+        await asyncio.to_thread(path.write_bytes, data)
         return f"/renders/{path.name}"
 
 
@@ -353,11 +369,12 @@ class SupabaseStore:
             raise
 
     async def save_render(self, venture_id: str, idx: int, png: bytes) -> str:
-        path = f"{venture_id}/{idx}.png"
+        data, ext, mime = await asyncio.to_thread(compress_render, png)
+        path = f"{venture_id}/{idx}.{ext}"
         r = await self._client.post(
             f"/storage/v1/object/{self.bucket}/{path}",
-            content=png,
-            headers={"Content-Type": "image/png", "x-upsert": "true"},
+            content=data,
+            headers={"Content-Type": mime, "x-upsert": "true"},
         )
         if r.status_code >= 400:
             raise RuntimeError(f"Storage upload failed: {r.status_code} {r.text[:200]}")
