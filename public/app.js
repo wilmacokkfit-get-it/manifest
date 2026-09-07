@@ -9,13 +9,9 @@
   const API = '__PORT_8000__'.startsWith('__') ? '' : '__PORT_8000__'; // proxy prefix when deployed as a preview
   const $ = (s, r = document) => r.querySelector(s);
 
-  // ---------- owner key (kept in localStorage when allowed, memory otherwise) ----------
-  let ownerToken = null;
-  try { ownerToken = localStorage.getItem('manifest_owner'); } catch (_) {}
-  if (!ownerToken) {
-    ownerToken = crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now();
-    try { localStorage.setItem('manifest_owner', ownerToken); } catch (_) {}
-  }
+  // ---------- identity ----------
+  // The creator key never lives in the page. The server sets an HttpOnly cookie
+  // (or the hosting proxy supplies a visitor id), so nothing here can be forged or leaked.
 
   // ---------- tiny DOM builder ----------
   function h(tag, attrs, ...kids) {
@@ -41,7 +37,8 @@
   async function api(path, opts = {}) {
     const res = await fetch(API + path, {
       ...opts,
-      headers: { 'Content-Type': 'application/json', 'X-Owner-Token': ownerToken, ...(opts.headers || {}) },
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
     });
     let data = null;
     try { data = await res.json(); } catch (_) {}
@@ -166,7 +163,8 @@
     try {
       const res = await fetch(API + '/api/manifest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Owner-Token': ownerToken },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idea }),
       });
       if (!res.ok || !res.body) {

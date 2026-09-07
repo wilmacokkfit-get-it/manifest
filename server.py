@@ -102,9 +102,29 @@ def _record_hit(caller: str) -> None:
     _hits[caller].append(time.time())
 
 
+COOKIE = "manifest_owner"
+
+
 def _owner_token(request: Request) -> str:
-    """The proxy in preview injects X-Visitor-Id; real deployments get a client token."""
-    return request.headers.get("x-visitor-id") or request.headers.get("x-owner-token") or new_token()
+    """Who is this? Prefer the hosting proxy's stable visitor id, then our own
+    first-party cookie (set by the middleware below), never anything the page
+    can forge from JavaScript."""
+    return request.headers.get("x-visitor-id") or request.state.owner
+
+
+@app.middleware("http")
+async def _identity_cookie(request: Request, call_next):
+    """Give every visitor a private, HttpOnly creator key on first contact."""
+    token = request.cookies.get(COOKIE)
+    fresh = False
+    if not token or len(token) < 16:
+        token, fresh = new_token(), True
+    request.state.owner = token
+    response = await call_next(request)
+    if fresh and not request.headers.get("x-visitor-id"):
+        response.set_cookie(COOKIE, token, max_age=60 * 60 * 24 * 365 * 2, httponly=True,
+                            samesite="lax", secure=request.url.scheme == "https")
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +300,7 @@ async def _load(slug: str, request: Request) -> tuple[dict, bool]:
     v = await store.get_by_slug(slug)
     if not v:
         raise HTTPException(404, "No venture lives at this address.")
-    token = request.headers.get("x-visitor-id") or request.headers.get("x-owner-token") or ""
+    token = _owner_token(request)
     is_owner = bool(token) and token == v["owner_token"]
     if v.get("visibility") != "public" and not is_owner:
         raise HTTPException(404, "This venture hasn't been released by its creator.")
