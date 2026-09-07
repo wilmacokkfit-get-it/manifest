@@ -1,0 +1,582 @@
+/* MANIFEST — client
+   Vanilla JS, no build step. Every piece of text is inserted with textContent,
+   never innerHTML, so nothing a model or a stranger types can run in the page. */
+(() => {
+  'use strict';
+
+  // ---------- environment ----------
+  const SERVED = !!window.__MANIFEST_SERVED__;                 // HTML came from server.py (clean URLs)
+  const API = '__PORT_8000__'.startsWith('__') ? '' : '__PORT_8000__'; // proxy prefix when deployed as a preview
+  const $ = (s, r = document) => r.querySelector(s);
+
+  // ---------- owner key (kept in localStorage when allowed, memory otherwise) ----------
+  let ownerToken = null;
+  try { ownerToken = localStorage.getItem('manifest_owner'); } catch (_) {}
+  if (!ownerToken) {
+    ownerToken = crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now();
+    try { localStorage.setItem('manifest_owner', ownerToken); } catch (_) {}
+  }
+
+  // ---------- tiny DOM builder ----------
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    if (attrs) for (const [k, v] of Object.entries(attrs)) {
+      if (v == null || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+      else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+      else if (k === 'text') el.textContent = v;
+      else el.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids.flat()) {
+      if (kid == null || kid === false) continue;
+      el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+    return el;
+  }
+  const svgNS = 'http://www.w3.org/2000/svg';
+  function svg(markup) { const t = document.createElement('template'); t.innerHTML = markup.trim(); return t.content.firstChild; }
+
+  // ---------- api ----------
+  async function api(path, opts = {}) {
+    const res = await fetch(API + path, {
+      ...opts,
+      headers: { 'Content-Type': 'application/json', 'X-Owner-Token': ownerToken, ...(opts.headers || {}) },
+    });
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error((data && data.error) || 'Something went wrong.');
+    return data;
+  }
+  const assetUrl = (u) => (u && u.startsWith('/') ? API + u : u);
+
+  // ---------- routing ----------
+  function href(route) {
+    if (SERVED) return route;
+    if (route === '/') return location.pathname;
+    if (route.startsWith('/v/')) return `${location.pathname}?v=${encodeURIComponent(route.slice(3))}`;
+    return `${location.pathname}?p=${encodeURIComponent(route.slice(1))}`;
+  }
+  function currentRoute() {
+    if (SERVED) return location.pathname.replace(/\/$/, '') || '/';
+    const q = new URLSearchParams(location.search);
+    if (q.get('v')) return `/v/${q.get('v')}`;
+    if (q.get('p')) return `/${q.get('p')}`;
+    return '/';
+  }
+  function go(route, { replace = false } = {}) {
+    const url = href(route);
+    if (replace) history.replaceState({}, '', url); else history.pushState({}, '', url);
+    render();
+  }
+  function shareUrl(slug) {
+    return location.origin + href(`/v/${slug}`);
+  }
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[data-route]');
+    if (!a) return;
+    e.preventDefault();
+    const route = a.dataset.route;
+    if (route === '/' && currentRoute() === '/') { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    go(route);
+  });
+  window.addEventListener('popstate', render);
+
+  const app = $('#app');
+  const landing = $('#view-landing');
+  let activeView = null;   // non-landing view element
+
+  function mount(el, route) {
+    if (activeView) { if (typeof activeView.cleanup === 'function') activeView.cleanup(); activeView.remove(); }
+    activeView = el;
+    if (el) { landing.classList.add('hidden'); app.append(el); }
+    else landing.classList.remove('hidden');
+    document.querySelectorAll('.nav-links a').forEach(a => {
+      if (a.dataset.route === route) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    });
+    window.scrollTo(0, 0);
+  }
+
+  function render() {
+    const route = currentRoute();
+    setAccent(null);
+    if (route === '/') { mount(null, '/'); resetHero(); checkReveals(); return; }
+    if (route.startsWith('/v/')) { mount(VentureView({ slug: route.slice(3) }), null); return; }
+    if (route === '/marketplace') { mount(FloorView(), '/marketplace'); return; }
+    if (route === '/waitlist') { mount(WaitlistView(), '/waitlist'); return; }
+    if (route === '/about') { mount(AboutView(), null); return; }
+    mount(NotFound('No page lives at this address.'), null);
+  }
+
+  // ---------- accent ----------
+  function setAccent(hex) {
+    document.documentElement.style.setProperty('--accent', hex || '#e8eeff');
+  }
+
+  // ---------- toast ----------
+  let toastTimer;
+  function toast(msg) {
+    const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+  }
+
+  // ---------- landing ----------
+  const ideaForm = $('#idea-form'), ideaInput = $('#idea'), orbWrap = $('#orb-wrap');
+  const formingName = $('#forming-name'), formingStatus = $('#forming-status'), heroError = $('#hero-error'), heroTag = $('#hero-tag');
+  const phrases = ['Reaching into the idea space…', 'Finding the shape of it…', 'Naming what does not exist yet…', 'Drafting the launch path…', 'Sealing the record…'];
+
+  ideaInput.addEventListener('input', () => { ideaInput.style.height = 'auto'; ideaInput.style.height = ideaInput.scrollHeight + 'px'; });
+  ideaInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ideaForm.requestSubmit(); } });
+  $('#cta-top').addEventListener('click', (e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); setTimeout(() => ideaInput.focus(), 500); });
+
+  function resetHero() {
+    orbWrap.classList.remove('forming'); formingName.textContent = ''; formingStatus.textContent = '';
+    heroError.textContent = ''; heroTag.style.opacity = '';
+  }
+
+  ideaForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const idea = ideaInput.value.trim();
+    if (idea.length < 8) { heroError.textContent = 'Give it a full sentence.'; return; }
+    heroError.textContent = '';
+    startManifest(idea);
+  });
+
+  function checkReveals() {
+    document.querySelectorAll('.reveal:not(.in)').forEach(el => {
+      if (el.getBoundingClientRect().top < innerHeight * 0.88) el.classList.add('in');
+    });
+  }
+  addEventListener('scroll', checkReveals, { passive: true });
+  addEventListener('resize', checkReveals);
+
+  // ---------- the reveal ----------
+  async function startManifest(idea) {
+    orbWrap.classList.add('forming');
+    heroTag.style.opacity = '0';
+    let pi = 0; formingStatus.textContent = phrases[0];
+    const phraseTimer = setInterval(() => { pi = (pi + 1) % phrases.length; formingStatus.textContent = phrases[pi]; }, 2200);
+
+    let view = null;           // VentureView once we move to it
+    let moved = false;
+    let meta = null;
+
+    const finish = () => clearInterval(phraseTimer);
+
+    try {
+      const res = await fetch(API + '/api/manifest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Owner-Token': ownerToken },
+        body: JSON.stringify({ idea }),
+      });
+      if (!res.ok || !res.body) {
+        let msg = 'The engine is unavailable right now.';
+        try { msg = (await res.json()).error || msg; } catch (_) {}
+        throw new Error(msg);
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let done = false;
+      while (!done) {
+        const { value, done: rd } = await reader.read();
+        if (rd) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
+          const ev = parseSSE(raw);
+          if (!ev) continue;
+          if (ev.event === 'meta') meta = ev.data;
+          else if (ev.event === 'partial') {
+            const { data, streaming } = ev.data;
+            if (!moved) {
+              formingName.textContent = data.name || '';
+              formingName.classList.toggle('caret', streaming === 'name');
+              if (data.name && streaming && streaming !== 'name') {
+                // name is complete → move to the page
+                moved = true; finish();
+                view = VentureView({ live: { meta, data, streaming, idea } });
+                mount(view, null);
+              }
+            } else view.update(data, streaming);
+          } else if (ev.event === 'done') {
+            done = true; finish();
+            if (!moved) { view = VentureView({ live: { meta, data: ev.data, streaming: null, idea } }); mount(view, null); }
+            view.complete(ev.data);
+            history.replaceState({}, '', href(`/v/${ev.data.slug}`));
+          } else if (ev.event === 'error') {
+            throw new Error(ev.data.message || 'The engine stalled.');
+          }
+        }
+      }
+    } catch (err) {
+      finish();
+      if (moved) { toast(err.message); }
+      else { orbWrap.classList.remove('forming'); formingStatus.textContent = ''; heroTag.style.opacity = ''; heroError.textContent = err.message; }
+    }
+  }
+
+  function parseSSE(block) {
+    let event = 'message', data = '';
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) data += line.slice(5).trim();
+    }
+    if (!data) return null;
+    try { return { event, data: JSON.parse(data) }; } catch (_) { return null; }
+  }
+
+  // ---------- venture view ----------
+  function VentureView({ slug, live }) {
+    const root = h('section', { class: 'view venture' });
+    const halo = h('div', { class: 'halo', 'aria-hidden': 'true' });
+
+    // header
+    const prov = h('div', { class: 'v-prov' });
+    const name = h('h1', { class: 'v-name' });
+    const tagline = h('p', { class: 'v-tagline' });
+    const desc = h('p', { class: 'v-desc' });
+    const cat = h('div', { class: 'v-cat' });
+    const head = h('header', { class: 'v-head' }, prov, name, tagline, desc, cat);
+
+    // renders
+    const renderSlots = [0, 1, 2].map(() => h('div', { class: 'render' }, h('div', { class: 'shimmer' }), h('img', { alt: '' })));
+    const renderStatus = h('p', { class: 'render-status', text: 'Rendering the product…' });
+    const renders = h('div', { class: 'renders hidden' }, h('h2', { class: 'v-label', text: 'Product renders' }), h('div', { class: 'render-grid' }, renderSlots), renderStatus);
+
+    // tiers
+    const tierEls = [];
+    const tiers = h('div', { class: 'tiers hidden' });
+
+    // roadmap
+    const road = h('div', { class: 'road' });
+    const roadmap = h('div', { class: 'roadmap hidden' }, h('h2', { class: 'v-label', text: 'Five steps to launch' }), road);
+
+    // grounding
+    const gEls = {};
+    const groundGrid = h('div', { class: 'ground-grid' },
+      ...[['exists', 'What already exists'], ['who_pays', 'Who actually pays'], ['first_hundred', 'The first hundred dollars']].map(([k, label]) => {
+        gEls[k] = h('p'); return h('div', { class: 'ground' }, h('b', { text: label }), gEls[k]);
+      }));
+    const grounding = h('div', { class: 'grounding hidden' }, h('h2', { class: 'v-label', text: 'The honest read' }), groundGrid,
+      h('p', { class: 'ground-note', text: 'Written by the engine, not verified. Treat it as a sharp friend’s first take.' }));
+
+    // seal
+    const sealCode = h('div', { class: 'code' }), sealWhen = h('div', { class: 'when' }), sealHash = h('div', { class: 'hash' });
+    const seal = h('div', { class: 'seal hidden' },
+      svg(`<svg class="seal-mark" viewBox="0 0 54 54" fill="none" aria-hidden="true"><circle cx="27" cy="27" r="25" stroke="currentColor" stroke-width="1"/><circle cx="27" cy="27" r="17" stroke="currentColor" stroke-width=".8" opacity=".5"/><circle cx="27" cy="27" r="4" fill="currentColor"/><path d="M27 2v8M27 44v8M2 27h8M44 27h8" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity=".7"/></svg>`),
+      h('div', { class: 'v-label', text: 'Provenance record', style: { marginBottom: '14px' } }),
+      sealCode, sealWhen, sealHash,
+      h('p', { class: 'fine', text: 'A SHA-256 hash of the exact words, the exact second, and the creator’s key. It proves this existed, here, first. It is not a patent or a trademark, and MANIFEST never takes ownership of what you make.' }));
+
+    // owner panel
+    const owner = h('div', { class: 'owner hidden' });
+    // signals
+    const signals = h('div', { class: 'signals hidden' });
+    // actions
+    const actions = h('div', { class: 'v-actions hidden' });
+
+    root.append(halo, head, renders, tiers, roadmap, grounding, seal, owner, signals, actions);
+
+    let venture = null;   // full record once complete/loaded
+    let pollTimer = null, pollStart = 0;
+    const born = new Set();
+    const show = (el) => { if (!el.classList.contains('hidden')) return; el.classList.remove('hidden'); el.classList.add('born'); };
+    const setText = (el, txt, streaming) => { el.textContent = txt || ''; el.classList.toggle('caret', !!streaming); };
+
+    // ---- progressive update while the model writes ----
+    function update(d, streaming) {
+      if (d.accent && /^#[0-9a-fA-F]{6}$/.test(d.accent)) setAccent(d.accent);
+      setText(name, d.name, false);
+      if (d.tagline != null) setText(tagline, d.tagline, streaming === 'tagline');
+      if (d.description != null) setText(desc, d.description, streaming === 'description');
+      if (d.category && streaming !== 'category') cat.textContent = d.category;
+      if (Array.isArray(d.tiers) && d.tiers.length) {
+        show(tiers);
+        d.tiers.forEach((t, i) => {
+          if (!tierEls[i]) {
+            tierEls[i] = { root: h('div', { class: 'tier born' }, h('div', { class: 'tl' }), h('h3', { class: 'tt' }), h('p', { class: 'td' })) };
+            tiers.append(tierEls[i].root);
+          }
+          const r = tierEls[i].root;
+          r.querySelector('.tl').textContent = t.label || ['The Lean Build', 'The Real Product', 'The Empire'][i];
+          const last = streaming === 'tiers' && i === d.tiers.length - 1;
+          setText(r.querySelector('.tt'), t.title, last && t.description == null);
+          setText(r.querySelector('.td'), t.description, last && t.description != null);
+        });
+      }
+      if (Array.isArray(d.roadmap) && d.roadmap.length) {
+        show(roadmap);
+        d.roadmap.forEach((s, i) => {
+          let el = road.children[i];
+          if (!el) {
+            el = h('div', { class: 'road-step born' },
+              h('div', { class: 'road-head' }, h('div', { class: 'road-num', text: String(i + 1).padStart(2, '0') }), h('div', { class: 'road-action' }), h('div', { class: 'road-caret', text: '⌄' })),
+              h('div', { class: 'road-where' }));
+            el.addEventListener('click', () => el.classList.toggle('open'));
+            road.append(el);
+          }
+          const last = streaming === 'roadmap' && i === d.roadmap.length - 1;
+          setText(el.querySelector('.road-action'), s.action, last && s.where == null);
+          el.querySelector('.road-where').textContent = s.where || '';
+        });
+      }
+      if (d.grounding && typeof d.grounding === 'object') {
+        show(grounding);
+        const keys = ['exists', 'who_pays', 'first_hundred'];
+        keys.forEach((k, i) => {
+          if (d.grounding[k] == null) return;
+          const isLast = streaming === 'grounding' && keys.slice(i + 1).every(kk => d.grounding[kk] == null);
+          setText(gEls[k], d.grounding[k], isLast);
+        });
+      }
+      if (d.image_prompts && !streaming) show(renders);
+    }
+
+    // ---- full record (after done, or loaded from the API) ----
+    function complete(v) {
+      venture = v;
+      update({ ...v, image_prompts: true }, null);
+      [tagline, desc, ...Object.values(gEls)].forEach(el => el.classList.remove('caret'));
+      root.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
+      prov.replaceChildren('Provenance ', h('b', { text: v.provenance.code }), ' · minted ', fmtDate(v.provenance.minted_at));
+      sealCode.textContent = v.provenance.code;
+      sealWhen.textContent = `Minted ${fmtDate(v.provenance.minted_at, true)}`;
+      sealHash.textContent = v.provenance.hash;
+      show(seal);
+      if (v.images_status === 'failed' && !(v.images || []).some(Boolean)) renders.classList.add('hidden');
+      else { show(renders); applyImages(v); if (v.images_status === 'pending') startPolling(); }
+      renderOwner(v);
+      renderSignals(v);
+      renderActions(v);
+    }
+
+    function applyImages(v) {
+      (v.images || []).forEach((u, i) => {
+        const slot = renderSlots[i]; if (!u || !slot || slot.classList.contains('done')) return;
+        const img = slot.querySelector('img');
+        img.alt = `${v.name} render ${i + 1}`;
+        img.onload = () => { img.classList.add('on'); slot.classList.add('done'); };
+        img.src = assetUrl(u);
+      });
+      if (v.images_status === 'ready') renderStatus.classList.add('hidden');
+      else if (v.images_status === 'failed') {
+        renderStatus.textContent = (v.images || []).some(Boolean) ? '' : 'Renders unavailable for this one.';
+        renderSlots.forEach(s => { if (!s.classList.contains('done')) s.classList.add('done'); });
+      } else {
+        const n = (v.images || []).filter(Boolean).length;
+        renderStatus.textContent = n ? `${n} of 3 renders in…` : 'Rendering the product…';
+      }
+    }
+
+    function startPolling() {
+      stopPolling(); pollStart = Date.now();
+      let delay = 2500;
+      const tick = async () => {
+        if (Date.now() - pollStart > 150000) { renderStatus.textContent = 'Renders are taking longer than usual. Refresh in a minute.'; return; }
+        try {
+          const fresh = await api(`/api/ventures/${encodeURIComponent(venture.slug)}`);
+          venture = { ...venture, ...fresh };
+          applyImages(fresh);
+          if (fresh.images_status === 'pending') { delay = Math.min(delay * 1.25, 8000); pollTimer = setTimeout(tick, delay); }
+        } catch (_) { pollTimer = setTimeout(tick, 6000); }
+      };
+      pollTimer = setTimeout(tick, delay);
+    }
+    function stopPolling() { if (pollTimer) clearTimeout(pollTimer); pollTimer = null; }
+
+    function renderOwner(v) {
+      owner.replaceChildren();
+      if (!v.is_owner) { owner.classList.add('hidden'); return; }
+      if (v.visibility !== 'public') {
+        const btn = h('button', { class: 'btn primary', text: 'Release it →', onclick: async () => {
+          btn.disabled = true; btn.textContent = 'Releasing…';
+          try {
+            const updated = await api(`/api/ventures/${encodeURIComponent(v.slug)}/release`, { method: 'POST' });
+            toast('Released. The world can see it now.');
+            complete(updated);
+          } catch (e) { btn.disabled = false; btn.textContent = 'Release it →'; toast(e.message); }
+        } });
+        owner.append(
+          h('h3', { text: 'This venture is private.' }),
+          h('p', { text: 'Only you can see this page. Releasing it makes it public, lets people signal what they’d do with it, and starts its climb toward the Mark. The record already proves it was yours first.' }),
+          h('div', { class: 'row' }, btn, h('button', { class: 'btn ghost', text: 'Keep it private', onclick: () => toast('Kept private. It’s here whenever you come back.') })),
+        );
+      } else {
+        owner.append(
+          h('h3', { text: 'Released.' }),
+          h('p', { text: `Public since ${fmtDate(v.released_at, true)}. Share the link. Every signal it collects is real.` }),
+          h('div', { class: 'row' }, copyBtn(v, 'Copy share link'), h('a', { class: 'btn ghost', href: href('/marketplace'), 'data-route': '/marketplace', text: 'See the Floor →' })),
+        );
+      }
+      show(owner);
+    }
+
+    function copyBtn(v, label) {
+      return h('button', { class: 'btn primary', text: label, onclick: async () => {
+        try { await navigator.clipboard.writeText(shareUrl(v.slug)); toast('Link copied.'); }
+        catch (_) { toast(shareUrl(v.slug)); }
+      } });
+    }
+
+    let activeSignal = null;
+    function renderSignals(v) {
+      signals.replaceChildren();
+      if (v.visibility !== 'public') { signals.classList.add('hidden'); return; }
+      const s = v.signals || { buy: 0, build: 0, fund: 0, total: 0 };
+      const mk = (type, label, sub) => {
+        const el = h('div', { class: 'sig' + (activeSignal === type ? ' active' : ''), role: 'button', tabindex: '0' },
+          h('div', { class: 'n', text: String(s[type] || 0) }),
+          h('div', { class: 'l' }, h('i', { text: label }), ` · ${sub}`));
+        const open = () => { activeSignal = type; renderSignals(venture); form.querySelector('input[type=email]').focus(); };
+        el.addEventListener('click', open);
+        el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+        return el;
+      };
+      const row = h('div', { class: 'sig-row' }, mk('buy', 'I’d buy this', 'customer'), mk('build', 'I’d build this', 'builder'), mk('fund', 'I’d fund this', 'investor'));
+
+      const email = h('input', { type: 'email', placeholder: 'you@domain.com', required: true, autocomplete: 'email' });
+      const price = h('input', { class: 'price', type: 'number', min: '0', step: '1', placeholder: 'Price $' });
+      const note = h('div', { class: 'sig-note' });
+      const form = h('form', { class: 'sig-form' + (activeSignal ? '' : ' hidden'), onsubmit: async (e) => {
+        e.preventDefault();
+        const body = { type: activeSignal, email: email.value.trim() };
+        if (activeSignal === 'buy' && price.value) body.price = Number(price.value);
+        try {
+          const updated = await api(`/api/ventures/${encodeURIComponent(v.slug)}/signals`, { method: 'POST', body: JSON.stringify(body) });
+          venture = updated;
+          activeSignal = null;
+          renderSignals(updated);
+          const n = signals.querySelector('.sig-note'); if (n) { n.textContent = updated.added ? 'Signal received. It counts.' : 'You already signaled this one.'; n.classList.add('ok'); }
+          if (updated.mark.marked && !v.mark.marked) toast('This venture just earned the Mark.');
+          if (updated.is_owner) renderOwner(updated);
+        } catch (err) { note.textContent = err.message; }
+      } });
+      if (activeSignal === 'buy') form.append(price);
+      form.append(email, h('button', { class: 'btn small primary', type: 'submit', text: activeSignal === 'buy' ? 'I’d buy it' : activeSignal === 'build' ? 'I’d build it' : 'I’d fund it' }));
+
+      const m = v.mark || {};
+      const progress = Math.min(1, Math.max(s.total / (m.threshold_signals || 25), ((s.build || 0) + (s.fund || 0)) / (m.threshold_build_fund || 5)));
+      const fill = h('div', { class: 'mark-fill' });
+      const track = m.marked
+        ? h('div', { class: 'mark-track' }, h('span', { class: 'marked-badge' }, svg('<svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><circle cx="5" cy="5" r="5"/></svg>'), `Marked · ${fmtDate(m.marked_at)}`))
+        : h('div', { class: 'mark-track' }, h('div', { class: 'mark-line' }, fill),
+            h('div', { class: 'mark-text' }, h('b', { text: String(s.total) }), ` of ${m.threshold_signals} signals · or ${m.threshold_build_fund} builders and funders · to the Mark`));
+      setTimeout(() => { fill.style.width = (progress * 100).toFixed(1) + '%'; }, 60);
+
+      signals.append(
+        h('h2', { class: 'sig-title', text: 'Would you move on this?' }),
+        h('p', { class: 'sig-sub', text: s.avg_price ? `People who’d buy it say about $${Math.round(s.avg_price)}. Real emails only, one signal per person per kind.` : 'Three honest buttons. Real emails only, one signal per person per kind. No fake bids, ever.' }),
+        row, form, note, track,
+      );
+      show(signals);
+    }
+
+    function renderActions(v) {
+      actions.replaceChildren(
+        v.visibility === 'public' ? copyBtn(v, 'Copy share link') : null,
+        h('button', { class: 'btn', text: 'Copy summary', onclick: async () => {
+          const t = `${v.name}\n${v.tagline}\n\n${v.description}\n\nProvenance ${v.provenance.code}\n${shareUrl(v.slug)}`;
+          try { await navigator.clipboard.writeText(t); toast('Summary copied.'); } catch (_) { toast('Could not copy on this device.'); }
+        } }),
+        h('a', { class: 'btn ghost', href: href('/'), 'data-route': '/', text: 'Manifest another' }),
+      );
+      show(actions);
+    }
+
+    // ---- boot ----
+    if (live) {
+      if (live.meta) prov.replaceChildren('Provenance ', h('b', { text: live.meta.provenance.code }), ' · minting…');
+      update(live.data, live.streaming);
+    } else if (slug) {
+      prov.textContent = 'Loading…';
+      api(`/api/ventures/${encodeURIComponent(slug)}`).then(complete).catch((e) => {
+        mount(NotFound(e.message), null);
+      });
+    }
+
+    root.update = update;
+    root.complete = complete;
+    root.cleanup = stopPolling;
+    return root;
+  }
+
+  function fmtDate(iso, withTime = false) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const date = d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    if (!withTime) return date;
+    return `${date} · ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })}`;
+  }
+
+  // ---------- floor ----------
+  function FloorView() {
+    const marked = h('div', { class: 'cards' }), rising = h('div', { class: 'cards' });
+    const root = h('section', { class: 'view floor' },
+      h('div', { class: 'floor-head' }, h('div', { class: 'eyebrow', text: 'The Floor' }),
+        h('h2', { text: 'Ventures that earned their place.' }),
+        h('p', { class: 'lead', text: 'Every venture here was born from one sentence, sealed to its creator, and released on purpose. The Marked ones crossed a real signal threshold.' })),
+      h('div', { class: 'floor-section' }, h('h3', { class: 'v-label', text: 'Marked' }), marked),
+      h('div', { class: 'floor-section' }, h('h3', { class: 'v-label', text: 'Rising' }), rising),
+    );
+    const card = (c) => {
+      const el = h('a', { class: 'card', href: href(`/v/${c.slug}`), 'data-route': `/v/${c.slug}` },
+        h('div', { class: 'thumb' }, c.image ? h('img', { src: assetUrl(c.image), alt: '', loading: 'lazy' }) : null),
+        h('div', { class: 'name', text: c.name }), h('div', { class: 'tag', text: c.tagline }),
+        h('div', { class: 'meta' }, h('span', { text: c.category || '' }), h('span', {}, h('b', { text: String(c.signals.total) }), ` signal${c.signals.total === 1 ? '' : 's'}`)));
+      el.style.setProperty('--accent', c.accent);
+      return el;
+    };
+    let timer;
+    const load = async () => {
+      try {
+        const data = await api('/api/marketplace');
+        marked.replaceChildren(...(data.marked.length ? data.marked.map(card) : [h('p', { class: 'empty', text: 'No venture has earned the Mark yet. The first one will be remembered.' })]));
+        rising.replaceChildren(...(data.rising.length ? data.rising.map(card) : [h('p', { class: 'empty' }, 'Nothing released yet — ', h('a', { href: href('/'), 'data-route': '/', text: 'manifest the first one' }), '.')]));
+      } catch (_) {}
+    };
+    load(); timer = setInterval(load, 20000);
+    root.cleanup = () => clearInterval(timer);
+    return root;
+  }
+
+  // ---------- waitlist ----------
+  function WaitlistView() {
+    const name = h('input', { placeholder: 'Name (optional)', autocomplete: 'name' });
+    const email = h('input', { type: 'email', placeholder: 'Email', required: true, autocomplete: 'email' });
+    const role = h('select', {}, h('option', { value: 'Builder', text: 'I build things' }), h('option', { value: 'Investor', text: 'I fund things' }), h('option', { value: 'Curious', text: 'Just curious' }));
+    const done = h('div', { class: 'wl-done hidden', text: 'You’re on the list. MANIFEST will find you.' });
+    const form = h('form', { class: 'wl-form', onsubmit: async (e) => {
+      e.preventDefault();
+      try { await api('/api/waitlist', { method: 'POST', body: JSON.stringify({ name: name.value.trim(), email: email.value.trim(), role: role.value }) }); form.classList.add('hidden'); done.classList.remove('hidden'); }
+      catch (err) { toast(err.message); }
+    } }, name, email, role, h('button', { class: 'btn primary', type: 'submit', text: 'Join the waitlist' }));
+    return h('section', { class: 'view waitlist' },
+      h('div', { class: 'eyebrow', text: 'Early access' }),
+      h('h2', {}, 'Reserve your place', h('br'), 'at the edge of invention.'),
+      h('p', { class: 'lead', text: 'Be first in when the Floor opens to builders and funders, and when new Marked ventures land.' }),
+      form, done);
+  }
+
+  // ---------- about / record explainer ----------
+  function AboutView() {
+    return h('section', { class: 'view section' },
+      h('div', { class: 'eyebrow', text: 'The record' }),
+      h('h2', { text: 'What the provenance record is, and isn’t.' }),
+      h('p', { class: 'lead', text: 'When a venture is born, MANIFEST computes a SHA-256 hash of three things: the exact sentence you typed, the exact second it was minted, and your private creator key. That hash is stored with the venture and shown on its page.' }),
+      h('p', { class: 'lead', style: { marginTop: '18px' }, text: 'Because the hash can only be produced from those exact inputs, it proves the sentence existed at that moment and was minted by the holder of that key. Anyone can verify it. Nobody can back-date it.' }),
+      h('p', { class: 'lead', style: { marginTop: '18px' }, text: 'It is not a patent, a trademark, or a copyright registration. Publishing an idea can affect your ability to patent it later, so releasing is your call and yours alone. MANIFEST never takes ownership of anything you make here.' }),
+      h('div', { style: { marginTop: '40px' } }, h('a', { class: 'btn', href: href('/'), 'data-route': '/', text: '← Back' })));
+  }
+
+  function NotFound(msg) {
+    return h('section', { class: 'view notfound' },
+      h('h2', { text: 'Nothing here yet.' }), h('p', { text: msg || 'No venture lives at this address.' }),
+      h('a', { class: 'btn primary', href: href('/'), 'data-route': '/', text: 'Manifest one' }));
+  }
+
+  // ---------- start ----------
+  render();
+  setTimeout(checkReveals, 50);
+})();

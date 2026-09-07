@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080808">
+<!--BASE-->
+<!--OG-->
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&family=Playfair+Display:ital,wght@0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<nav class="nav" aria-label="Primary">
+  <a class="logo" href="/" data-route="/" aria-label="MANIFEST home">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9.5" stroke="currentColor" stroke-width="1"/>
+      <circle cx="12" cy="12" r="2.2" fill="currentColor"/>
+      <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity=".6"/>
+    </svg>
+    <span>MANIFEST</span>
+  </a>
+  <div class="nav-links">
+    <a href="/marketplace" data-route="/marketplace">The Floor</a>
+    <a href="/waitlist" data-route="/waitlist">Waitlist</a>
+  </div>
+</nav>
+
+<main id="app">
+  <!-- Landing is in markup so the first paint is instant. Other views render from app.js. -->
+  <section class="view" id="view-landing">
+    <div class="hero">
+      <div class="eyebrow">One sentence in. A venture out.</div>
+      <div class="orb-wrap" id="orb-wrap">
+        <div class="orb" aria-hidden="true"></div>
+        <form class="idea-form" id="idea-form">
+          <label class="sr-only" for="idea">Your idea, in one sentence</label>
+          <textarea class="idea-input" id="idea" rows="1" maxlength="300" placeholder="Type one sentence." autocomplete="off"></textarea>
+          <button type="submit" class="idea-submit">Manifest it →</button>
+        </form>
+        <div class="forming-name" id="forming-name" aria-live="polite"></div>
+      </div>
+      <div class="forming-status" id="forming-status"></div>
+      <p class="hero-tag" id="hero-tag">Like the idea already exists. You're just reaching in to pull it out.</p>
+      <div class="hero-error" id="hero-error" role="alert"></div>
+    </div>
+
+    <div class="section center reveal">
+      <h2>Watch it get born.</h2>
+      <p class="lead">You type. The name appears. Then the tagline writes itself, the plan fills in, and the first render fades up while you're still reading. Under twenty seconds, start to finish.</p>
+      <div class="steps">
+        <div class="step"><div class="num">01</div><h3>Speak it</h3><p>One sentence. A frustration, a want, the thing you keep wishing someone would make.</p></div>
+        <div class="step"><div class="num">02</div><h3>Watch it form</h3><p>Name, tagline, three ways to build it, five steps to launch, an honest read, three renders.</p></div>
+        <div class="step"><div class="num">03</div><h3>Sealed to you</h3><p>A provenance record is minted the instant it exists. Yours. Private until you say otherwise.</p></div>
+        <div class="step"><div class="num">04</div><h3>Release it</h3><p>One deliberate click makes it public. Then people tell you if they'd buy it, build it, or fund it.</p></div>
+      </div>
+    </div>
+
+    <div class="section reveal">
+      <div class="pillars">
+        <div>
+          <h2>Private by default.<br>Public by choice.</h2>
+          <p class="lead">Nothing you type is listed, sold, or shown to anyone until you release it. The record proves it was yours first.</p>
+        </div>
+        <div class="pillar-list">
+          <div class="pillar"><b>Provenance</b><span>A SHA-256 record of your exact words, the exact second, and your key. Independently verifiable, forever.</span></div>
+          <div class="pillar"><b>Signals</b><span>No fake bids. Three real buttons: I'd buy this, I'd build this, I'd fund this. Each one needs a real email.</span></div>
+          <div class="pillar"><b>The Mark</b><span>Ventures that cross the signal threshold earn the Mark and step onto the Floor. Scarcity is real because the number is real.</span></div>
+          <div class="pillar"><b>Honesty</b><span>No made-up scores. Every venture ships with what already exists, who actually pays, and how the first hundred dollars happens.</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section center reveal">
+      <h2>Built for people who move at the speed of thought.</h2>
+      <p class="lead">No decks. No forms. No months of validation. Just the idea, made real enough to show someone.</p>
+      <div style="margin-top:36px"><a class="btn primary" href="#idea" id="cta-top">Manifest one now</a></div>
+    </div>
+
+    <footer>
+      Every venture is provenance-sealed to its creator the instant it exists.<br>
+      MANIFEST never owns your idea. Read the <a href="/about" data-route="/about">record explainer</a>.
+    </footer>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<!--SERVED-->
+<script src="app.js"></script>
+</body>
+</html>
