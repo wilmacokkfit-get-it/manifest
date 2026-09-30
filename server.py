@@ -131,7 +131,7 @@ async def _identity_cookie(request: Request, call_next):
 # Shaping
 # ---------------------------------------------------------------------------
 
-def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None) -> dict:
+def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: list | None = None) -> dict:
     counts = counts or {
         "buy": v.get("buy_count", 0), "build": v.get("build_count", 0), "fund": v.get("fund_count", 0),
         "total": v.get("signal_count", 0), "avg_price": None,
@@ -163,7 +163,24 @@ def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None) -> dict
         "created_at": v["created_at"],
         "is_owner": is_owner,
         "idea": v.get("idea_raw") if is_owner else None,
+        "path": _path_view(v.get("path"), is_owner),
+        "needs": needs or [],
     }
+
+
+def _path_view(path: dict | None, is_owner: bool) -> dict | None:
+    if not path:
+        return None
+    steps = path.get("steps") or []
+    done = sum(1 for st in steps if st.get("status") == "done")
+    out = {
+        "tier": path.get("tier"), "tier_label": path.get("tier_label"), "chosen_at": path.get("chosen_at"),
+        "status": path.get("status", "ready"), "first_move": path.get("first_move"), "watch_out": path.get("watch_out"),
+        "steps": steps, "done": done, "total": len(steps),
+    }
+    if not is_owner:
+        out["steps"] = [{k: v for k, v in st.items() if k != "note"} for st in steps]
+    return out
 
 
 def _card_view(v: dict) -> dict:
@@ -174,7 +191,15 @@ def _card_view(v: dict) -> dict:
                     "total": v.get("signal_count", 0)},
         "marked": bool(v.get("promoted_at")), "released_at": v.get("released_at"),
         "provenance_code": v["provenance_code"],
+        "path": _path_progress(v.get("path")),
     }
+
+
+def _path_progress(path: dict | None) -> dict | None:
+    if not path or not path.get("steps"):
+        return None
+    steps = path["steps"]
+    return {"tier_label": path.get("tier_label"), "done": sum(1 for st in steps if st.get("status") == "done"), "total": len(steps)}
 
 
 def _normalize(data: dict) -> dict:
@@ -307,11 +332,194 @@ async def _load(slug: str, request: Request) -> tuple[dict, bool]:
     return v, is_owner
 
 
+async def _needs_view(v: dict, is_owner: bool) -> list[dict]:
+    needs = await store.list_needs(v["id"])
+    out = []
+    for n in needs:
+        item = {"id": n["id"], "step_n": n.get("step_n"), "title": n["title"], "detail": n.get("detail") or "",
+                "status": n.get("status", "open"), "offer_count": int(n.get("offer_count") or 0), "created_at": n["created_at"]}
+        if is_owner:
+            item["offers"] = [{"email": o["email"], "name": o.get("name") or "", "message": o.get("message") or "",
+                               "created_at": o["created_at"]} for o in await store.list_offers(n["id"])]
+        out.append(item)
+    return out
+
+
+async def _full_view(v: dict, is_owner: bool) -> dict:
+    counts = await store.signal_counts(v["id"])
+    return _public_view(v, is_owner=is_owner, counts=counts, needs=await _needs_view(v, is_owner))
+
+
 @app.get("/api/ventures/{slug}")
 async def get_venture(slug: str, request: Request):
     v, is_owner = await _load(slug, request)
-    counts = await store.signal_counts(v["id"])
-    return _public_view(v, is_owner=is_owner, counts=counts)
+    return await _full_view(v, is_owner)
+
+
+# ---------------------------------------------------------------------------
+# The Path: pick a tier, get walked through it, ask the Floor for help
+# ---------------------------------------------------------------------------
+
+class PathBody(BaseModel):
+    tier: int
+
+
+def _normalize_path(data: dict, tier: int, tier_label: str) -> dict:
+    steps = []
+    for i, st in enumerate((data.get("steps") or [])[:8]):
+        if not isinstance(st, dict):
+            continue
+        sups = []
+        for sp in (st.get("suppliers") or [])[:3]:
+            if isinstance(sp, dict):
+                sups.append({"kind": str(sp.get("kind") or "")[:80],
+                             "examples": [str(x)[:60] for x in (sp.get("examples") or []) if isinstance(x, str)][:3],
+                             "search": str(sp.get("search") or "")[:100]})
+        steps.append({
+            "n": i + 1, "title": str(st.get("title") or f"Step {i + 1}")[:80], "why": str(st.get("why") or "")[:300],
+            "how": [str(x)[:320] for x in (st.get("how") or []) if isinstance(x, str)][:5],
+            "suppliers": sups, "cost": str(st.get("cost") or "")[:70], "time": str(st.get("time") or "")[:70],
+            "done_when": str(st.get("done_when") or "")[:320], "status": "todo", "note": "", "done_at": None,
+        })
+    return {"tier": tier, "tier_label": tier_label, "chosen_at": now_iso(), "status": "ready",
+            "first_move": str(data.get("first_move") or "")[:700], "watch_out": str(data.get("watch_out") or "")[:700],
+            "steps": steps}
+
+
+@app.post("/api/ventures/{slug}/path")
+async def choose_path(slug: str, body: PathBody, request: Request):
+    """Owner picks one of the three tiers. The engine streams a step-by-step guide for it."""
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can choose the path.")
+    tier = int(body.tier)
+    if tier not in (0, 1, 2):
+        raise HTTPException(400, "Pick path 0, 1, or 2.")
+    existing = v.get("path") or {}
+    if existing.get("steps") and any(st.get("status") != "todo" for st in existing["steps"]):
+        raise HTTPException(409, "You've already started walking a path. Finish it or reset it first.")
+    tier_label = (v.get("tiers") or [{}] * 3)[tier].get("label") or f"Path {tier + 1}"
+
+    async def gen():
+        buf = ""
+        last_emit, last_key = 0.0, None
+        try:
+            async for chunk in llm.stream_path_text(v, tier):
+                buf += chunk
+                now = time.time()
+                obj, key = parse_partial(buf)
+                if obj and (now - last_emit > 0.08 or key != last_key):
+                    last_emit, last_key = now, key
+                    yield _sse("partial", {"data": obj, "streaming": key})
+            obj, _ = parse_partial(buf)
+            if not obj or not obj.get("steps"):
+                raise RuntimeError("The engine returned nothing usable.")
+            path = _normalize_path(obj, tier, tier_label)
+            saved = await store.update_venture(v["id"], {"path": path})
+            yield _sse("done", await _full_view(saved, True))
+        except Exception as e:  # noqa: BLE001
+            print(f"[path] {slug} failed: {e}")
+            yield _sse("error", {"message": str(e)[:300] or "The engine stalled."})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class StepBody(BaseModel):
+    status: str | None = None
+    note: str | None = None
+
+
+@app.patch("/api/ventures/{slug}/path/steps/{n}")
+async def update_step(slug: str, n: int, body: StepBody, request: Request):
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can update the path.")
+    path = v.get("path") or {}
+    steps = path.get("steps") or []
+    step = next((st for st in steps if st.get("n") == n), None)
+    if not step:
+        raise HTTPException(404, "No such step.")
+    if body.status is not None:
+        if body.status not in ("todo", "doing", "done"):
+            raise HTTPException(400, "Status must be todo, doing, or done.")
+        step["status"] = body.status
+        step["done_at"] = now_iso() if body.status == "done" else None
+    if body.note is not None:
+        step["note"] = body.note.strip()[:1500]
+    saved = await store.update_venture(v["id"], {"path": path})
+    return await _full_view(saved, True)
+
+
+@app.delete("/api/ventures/{slug}/path")
+async def reset_path(slug: str, request: Request):
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can reset the path.")
+    saved = await store.update_venture(v["id"], {"path": None})
+    return await _full_view(saved, True)
+
+
+class NeedBody(BaseModel):
+    step_n: int | None = None
+    title: str
+    detail: str = ""
+
+
+@app.post("/api/ventures/{slug}/needs")
+async def create_need(slug: str, body: NeedBody, request: Request):
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can ask the Floor for help.")
+    title = body.title.strip()[:120]
+    if len(title) < 4:
+        raise HTTPException(400, "Say what you need in a few words.")
+    if len(await store.list_needs(v["id"])) >= 12:
+        raise HTTPException(429, "Twelve open asks is plenty. Close some first.")
+    await store.create_need(v["id"], body.step_n, title, body.detail.strip()[:600])
+    return await _full_view(v, True)
+
+
+class NeedStatusBody(BaseModel):
+    status: str
+
+
+@app.patch("/api/ventures/{slug}/needs/{need_id}")
+async def update_need(slug: str, need_id: str, body: NeedStatusBody, request: Request):
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can change an ask.")
+    if body.status not in ("open", "filled", "closed"):
+        raise HTTPException(400, "Status must be open, filled, or closed.")
+    n = await store.get_need(need_id)
+    if not n or n["venture_id"] != v["id"]:
+        raise HTTPException(404, "No such ask.")
+    await store.set_need_status(need_id, body.status)
+    return await _full_view(v, True)
+
+
+class OfferBody(BaseModel):
+    email: str
+    name: str = ""
+    message: str = ""
+
+
+@app.post("/api/ventures/{slug}/needs/{need_id}/offers")
+async def add_offer(slug: str, need_id: str, body: OfferBody, request: Request):
+    """Anyone can raise a hand on a public venture's ask. Real email, one per person per ask."""
+    v, is_owner = await _load(slug, request)
+    if v.get("visibility") != "public":
+        raise HTTPException(403, "This venture isn't public yet.")
+    n = await store.get_need(need_id)
+    if not n or n["venture_id"] != v["id"] or n.get("status") != "open":
+        raise HTTPException(404, "That ask isn't open.")
+    email = body.email.strip().lower()
+    if not _EMAIL.match(email):
+        raise HTTPException(400, "That email doesn't look right.")
+    added = await store.add_offer(need_id, email, body.name.strip()[:80], body.message.strip()[:600])
+    out = await _full_view(v, is_owner)
+    out["added"] = added
+    return out
 
 
 @app.post("/api/ventures/{slug}/release")
@@ -321,7 +529,7 @@ async def release(slug: str, request: Request):
         raise HTTPException(403, "Only the creator can release a venture.")
     if v.get("visibility") != "public":
         v = await store.update_venture(v["id"], {"visibility": "public", "released_at": now_iso()})
-    return _public_view(v, is_owner=True, counts=await store.signal_counts(v["id"]))
+    return await _full_view(v, True)
 
 
 class SignalBody(BaseModel):
@@ -353,7 +561,7 @@ async def signal(slug: str, body: SignalBody, request: Request):
     if not v.get("promoted_at") and (counts["total"] >= MARK_SIGNALS or counts["build"] + counts["fund"] >= MARK_BUILD_FUND):
         fields["promoted_at"] = now_iso()
     v = await store.update_venture(v["id"], fields)
-    out = _public_view(v, is_owner=is_owner, counts=counts)
+    out = _public_view(v, is_owner=is_owner, counts=counts, needs=await _needs_view(v, is_owner))
     out["added"] = added
     return out
 
@@ -362,7 +570,12 @@ async def signal(slug: str, body: SignalBody, request: Request):
 async def marketplace():
     rows = await store.list_public(80)
     cards = [_card_view(v) for v in rows]
-    return {"marked": [c for c in cards if c["marked"]], "rising": [c for c in cards if not c["marked"]]}
+    needs = await store.list_open_needs(40)
+    requests_ = [{"id": n["id"], "title": n["title"], "detail": n.get("detail") or "", "step_n": n.get("step_n"),
+                  "offer_count": int(n.get("offer_count") or 0), "created_at": n["created_at"],
+                  "venture": {"slug": n["venture_slug"], "name": n["venture_name"], "accent": n.get("venture_accent") or "#e8eeff"}}
+                 for n in needs]
+    return {"marked": [c for c in cards if c["marked"]], "rising": [c for c in cards if not c["marked"]], "requests": requests_}
 
 
 class WaitlistBody(BaseModel):

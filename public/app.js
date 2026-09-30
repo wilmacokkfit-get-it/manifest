@@ -251,6 +251,9 @@
     const road = h('div', { class: 'road' });
     const roadmap = h('div', { class: 'roadmap hidden' }, h('h2', { class: 'v-label', text: 'Five steps to launch' }), road);
 
+    // the path (chosen tier, walked step by step)
+    const path = h('div', { class: 'path hidden' });
+
     // grounding
     const gEls = {};
     const groundGrid = h('div', { class: 'ground-grid' },
@@ -275,7 +278,7 @@
     // actions
     const actions = h('div', { class: 'v-actions hidden' });
 
-    root.append(halo, head, renders, tiers, roadmap, grounding, seal, owner, signals, actions);
+    root.append(halo, head, renders, tiers, path, roadmap, grounding, seal, owner, signals, actions);
 
     let venture = null;   // full record once complete/loaded
     let pollTimer = null, pollStart = 0;
@@ -348,6 +351,8 @@
       renderOwner(v);
       renderSignals(v);
       renderActions(v);
+      renderTierPicks(v);
+      renderPath(v);
     }
 
     function applyImages(v) {
@@ -384,6 +389,207 @@
       pollTimer = setTimeout(tick, delay);
     }
     function stopPolling() { if (pollTimer) clearTimeout(pollTimer); pollTimer = null; }
+
+    // ---- The Path: pick one of the three, get walked through it ----
+    const TIER_NAMES = ['The Lean Build', 'The Real Product', 'The Empire'];
+    const gsearch = (q) => 'https://www.google.com/search?q=' + encodeURIComponent(q);
+    const vpath = (v, rest) => `/api/ventures/${encodeURIComponent(v.slug)}${rest}`;
+    let pathStreaming = false;
+
+    function renderTierPicks(v) {
+      root.querySelector('.pick-hint')?.remove();
+      tierEls.forEach((t, i) => {
+        const r = t.root;
+        r.querySelectorAll('.pick, .chosen-tag').forEach(x => x.remove());
+        const chosen = !!(v.path && v.path.tier === i);
+        r.classList.toggle('chosen', chosen);
+        if (chosen) r.append(h('span', { class: 'chosen-tag', text: v.is_owner ? 'Your path' : 'The path they chose' }));
+        else if (v.is_owner && !v.path && !pathStreaming) r.append(h('button', { class: 'btn small pick', text: 'Walk this path →', onclick: () => choosePath(v, i) }));
+      });
+      if (v.is_owner && !v.path && !pathStreaming) tiers.after(h('p', { class: 'pick-hint', text: 'Three ways to build it. Pick one and the engine walks you through it step by step, with suppliers to call, notes, and a place to ask the Floor for help. You can reset and pick again.' }));
+    }
+
+    async function choosePath(v, tier) {
+      if (pathStreaming) return;
+      pathStreaming = true;
+      renderTierPicks(v);
+      path.replaceChildren(
+        h('div', { class: 'path-head' }, h('div', { class: 'v-label', text: 'Your path' }), h('h2', { class: 'path-title caret', text: TIER_NAMES[tier] }),
+          h('p', { class: 'path-sub', text: 'The engine is writing your step-by-step guide. Steps appear as they land.' })),
+        h('div', { class: 'psteps' }));
+      show(path); roadmap.classList.add('hidden');
+      path.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      try {
+        const res = await fetch(API + vpath(v, '/path'), { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tier }) });
+        if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.detail || j.message || 'The engine stalled.'); }
+        const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+        while (true) {
+          const { value, done } = await reader.read(); if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
+            const ev = parseSSE(block); if (!ev) continue;
+            if (ev.event === 'partial') paintPartialPath(ev.data.data, ev.data.streaming);
+            else if (ev.event === 'done') { pathStreaming = false; complete(ev.data); toast('Your path is ready. Start with tonight.'); }
+            else if (ev.event === 'error') throw new Error(ev.data.message);
+          }
+        }
+        if (pathStreaming) throw new Error('The stream ended early.');
+      } catch (e) { pathStreaming = false; toast(e.message); renderTierPicks(venture); renderPath(venture); }
+    }
+
+    function paintPartialPath(d, streaming) {
+      const list = path.querySelector('.psteps'); if (!list) return;
+      if (d.first_move != null) {
+        let fm = path.querySelector('.first-move');
+        if (!fm) { fm = h('div', { class: 'first-move born' }, h('b', { text: 'Tonight' }), h('span')); list.before(fm); }
+        setText(fm.querySelector('span'), d.first_move, streaming === 'first_move');
+      }
+      (d.steps || []).forEach((st, i) => {
+        let el = list.children[i];
+        if (!el) {
+          el = h('div', { class: 'pstep born' }, h('div', { class: 'pstep-head' }, h('div', { class: 'pstep-num', text: String(i + 1).padStart(2, '0') }), h('div', { class: 'pstep-title' }), h('div', { class: 'pstep-status', text: 'writing' })));
+          list.append(el);
+        }
+        const last = streaming === 'steps' && i === d.steps.length - 1;
+        setText(el.querySelector('.pstep-title'), st.title, last && st.why == null);
+        if (last && st.why != null) el.querySelector('.pstep-status').textContent = 'writing details';
+        else el.querySelector('.pstep-status').textContent = 'to do';
+      });
+      const t = path.querySelector('.path-title'); if (t) t.classList.toggle('caret', !d.steps);
+    }
+
+    function renderPath(v) {
+      const p = v.path;
+      if (!p || !p.steps || !p.steps.length) { path.classList.add('hidden'); path.replaceChildren(); roadmap.classList.remove('hidden'); return; }
+      const own = v.is_owner;
+      roadmap.classList.add('hidden');
+      const current = p.steps.find(st => st.status !== 'done');
+      const fill = h('div', { class: 'mark-fill' });
+      const finished = p.done === p.total;
+      const progress = h('div', { class: 'path-progress' }, h('div', { class: 'mark-line' }, fill),
+        h('div', { class: 'mark-text' }, h('b', { text: String(p.done) }), ` of ${p.total} steps done${finished ? ' · built' : ''}`));
+      setTimeout(() => { fill.style.width = (p.total ? (p.done / p.total) * 100 : 0).toFixed(1) + '%'; }, 60);
+      const head = h('div', { class: 'path-head' },
+        h('div', { class: 'v-label', text: own ? 'Your path' : 'The path' }),
+        h('h2', { class: 'path-title', text: p.tier_label }),
+        h('p', { class: 'path-sub', text: own
+          ? 'Step by step. Check them off as you go, keep notes, use your own people or the suggested ones, and ask the Floor when you need a hand.'
+          : `${v.name} is being built in the open. If you can help with an open ask, raise a hand.` }),
+        progress);
+      const list = h('div', { class: 'psteps' }, ...p.steps.map(st => stepEl(v, st, !!current && st.n === current.n)));
+      const kids = [head];
+      if (p.first_move) kids.push(h('div', { class: 'first-move' }, h('b', { text: 'Tonight' }), h('span', { text: p.first_move })));
+      kids.push(list);
+      const loose = (v.needs || []).filter(n => !p.steps.some(st => st.n === n.step_n));
+      loose.forEach(n => kids.push(needEl(v, n)));
+      if (p.watch_out) kids.push(h('div', { class: 'watch-out' }, h('b', { text: 'Watch out' }), p.watch_out));
+      if (own) {
+        const reset = h('button', { class: 'btn ghost small', text: 'Reset path', onclick: async () => {
+          if (reset.dataset.armed !== '1') { reset.dataset.armed = '1'; reset.textContent = 'Sure? Notes and progress go too'; setTimeout(() => { reset.dataset.armed = ''; reset.textContent = 'Reset path'; }, 4000); return; }
+          try { complete(await api(vpath(v, '/path'), { method: 'DELETE' })); toast('Path reset. Pick again.'); } catch (e) { toast(e.message); }
+        } });
+        kids.push(h('div', { class: 'path-foot' }, reset));
+      }
+      path.replaceChildren(...kids);
+      show(path);
+    }
+
+    function stepEl(v, st, isCurrent) {
+      const own = v.is_owner;
+      const el = h('div', { class: `pstep ${st.status}${isCurrent ? ' current open' : ''}` });
+      const statusText = ({ todo: isCurrent ? 'up next' : 'to do', doing: 'in progress', done: 'done' })[st.status] || '';
+      const head = h('div', { class: 'pstep-head', onclick: () => el.classList.toggle('open') },
+        h('div', { class: 'pstep-num', text: String(st.n).padStart(2, '0') }), h('div', { class: 'pstep-title', text: st.title }), h('div', { class: 'pstep-status', text: statusText }));
+      const body = h('div', { class: 'pstep-body' });
+      if (st.why) body.append(h('p', { class: 'pstep-why', text: st.why }));
+      if (st.how && st.how.length) body.append(h('ul', { class: 'pstep-how' }, ...st.how.map(x => h('li', { text: x }))));
+      const meta = [];
+      if (st.cost) meta.push(h('span', {}, 'Cost ', h('b', { text: st.cost })));
+      if (st.time) meta.push(h('span', {}, 'Time ', h('b', { text: st.time })));
+      if (meta.length) body.append(h('div', { class: 'pstep-meta' }, ...meta));
+      if (st.done_when) body.append(h('p', { class: 'pstep-done-when' }, h('b', { text: 'Done when: ' }), st.done_when));
+      if (st.suppliers && st.suppliers.length) {
+        const sup = h('div', { class: 'sup' }, h('div', { class: 'sup-label', text: 'Who can help with this step' }));
+        st.suppliers.forEach(x => {
+          const row = h('div', { class: 'sup-row' }, h('span', { class: 'sup-kind', text: x.kind }));
+          (x.examples || []).forEach(n => row.append(h('a', { class: 'chip', href: gsearch(n), target: '_blank', rel: 'noopener', text: n })));
+          if (x.search) row.append(h('a', { class: 'chip search', href: gsearch(x.search), target: '_blank', rel: 'noopener', text: 'Search: ' + x.search }));
+          sup.append(row);
+        });
+        sup.append(h('p', { class: 'sup-note', text: 'Suggested by the engine, not vetted. Use your own people, or ask the Floor.' }));
+        body.append(sup);
+      }
+      (v.needs || []).filter(n => n.step_n === st.n).forEach(n => body.append(needEl(v, n)));
+      if (own) {
+        const ctl = h('div', { class: 'pstep-ctl' });
+        const set = async (status) => {
+          try { complete(await api(vpath(v, `/path/steps/${st.n}`), { method: 'PATCH', body: JSON.stringify({ status }) })); if (status === 'done') toast(`Step ${st.n} done.`); }
+          catch (e) { toast(e.message); }
+        };
+        if (st.status !== 'done') ctl.append(h('button', { class: 'btn small primary', text: 'Mark done', onclick: () => set('done') }));
+        if (st.status === 'todo') ctl.append(h('button', { class: 'btn small', text: 'Start it', onclick: () => set('doing') }));
+        if (st.status === 'done') ctl.append(h('button', { class: 'btn small ghost', text: 'Undo', onclick: () => set('todo') }));
+        const askBtn = h('button', { class: 'btn small ghost', text: 'Ask the Floor for help', onclick: () => {
+          askBtn.classList.add('hidden'); const f = needForm(v, st); ctl.after(f); f.querySelector('input').focus();
+        } });
+        ctl.append(askBtn);
+        const note = h('textarea', { class: 'pstep-note', placeholder: 'Your notes on this step: who you called, what they quoted, what you learned.' });
+        note.value = st.note || '';
+        let saved = note.value;
+        note.addEventListener('blur', async () => {
+          if (note.value === saved) return;
+          try { venture = await api(vpath(v, `/path/steps/${st.n}`), { method: 'PATCH', body: JSON.stringify({ note: note.value }) }); saved = note.value; toast('Note saved.'); }
+          catch (e) { toast(e.message); }
+        });
+        body.append(ctl, note);
+      }
+      el.append(head, body);
+      return el;
+    }
+
+    function needForm(v, st) {
+      const title = h('input', { placeholder: `What do you need for step ${st.n}? A shop, a part, a person…`, maxlength: '120', required: true });
+      const detail = h('textarea', { placeholder: 'Details: quantity, location, budget, timing.', maxlength: '600' });
+      const note = h('div', { class: 'form-note' });
+      return h('form', { class: 'need-form', onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          complete(await api(vpath(v, '/needs'), { method: 'POST', body: JSON.stringify({ step_n: st.n, title: title.value, detail: detail.value }) }));
+          toast(v.visibility === 'public' ? 'Posted to the Floor.' : 'Saved. It shows on the Floor once you release the venture.');
+        } catch (err) { note.textContent = err.message; }
+      } }, title, detail, h('button', { class: 'btn small primary', type: 'submit', text: 'Post the ask' }), note);
+    }
+
+    function needEl(v, n) {
+      const own = v.is_owner;
+      const el = h('div', { class: 'need' + (n.status !== 'open' ? ' filled' : ''), id: 'need-' + n.id });
+      el.append(h('div', { class: 'need-head' },
+        h('div', { class: 'need-title' }, h('i', { text: n.status === 'open' ? 'Open ask' : n.status }), n.title),
+        h('div', { class: 'need-count', text: n.offer_count === 1 ? '1 hand raised' : `${n.offer_count} hands raised` })));
+      if (n.detail) el.append(h('p', { class: 'need-detail', text: n.detail }));
+      if (own) {
+        (n.offers || []).forEach(o => el.append(h('div', { class: 'offer' }, h('b', { text: o.name || 'Someone' }), ' ', h('span', { text: o.email }), o.message ? h('div', { text: o.message }) : null)));
+        if (n.status === 'open') el.append(h('div', { class: 'pstep-ctl' }, h('button', { class: 'btn small ghost', text: 'Mark filled', onclick: async () => {
+          try { complete(await api(vpath(v, `/needs/${n.id}`), { method: 'PATCH', body: JSON.stringify({ status: 'filled' }) })); } catch (e) { toast(e.message); }
+        } })));
+      } else if (n.status === 'open' && v.visibility === 'public') {
+        const name = h('input', { placeholder: 'Your name or shop', maxlength: '80' });
+        const email = h('input', { type: 'email', placeholder: 'you@domain.com', required: true, autocomplete: 'email' });
+        const msg = h('textarea', { placeholder: 'What you can do, where you are, rough terms.', maxlength: '600' });
+        const note = h('div', { class: 'form-note' });
+        const btn = h('button', { class: 'btn small primary', type: 'submit', text: 'I can help' });
+        el.append(h('form', { class: 'offer-form', onsubmit: async (e) => {
+          e.preventDefault(); btn.disabled = true;
+          try {
+            const u = await api(vpath(v, `/needs/${n.id}/offers`), { method: 'POST', body: JSON.stringify({ email: email.value, name: name.value, message: msg.value }) });
+            complete(u); toast(u.added ? 'Hand raised. The creator sees your email.' : 'You already raised a hand on this one.');
+          } catch (err) { btn.disabled = false; note.textContent = err.message; }
+        } }, name, email, msg, btn, note));
+      }
+      return el;
+    }
 
     function renderOwner(v) {
       owner.replaceChildren();
@@ -511,19 +717,29 @@
 
   // ---------- floor ----------
   function FloorView() {
-    const marked = h('div', { class: 'cards' }), rising = h('div', { class: 'cards' });
+    const marked = h('div', { class: 'cards' }), rising = h('div', { class: 'cards' }), reqs = h('div', { class: 'reqs' });
     const root = h('section', { class: 'view floor' },
       h('div', { class: 'floor-head' }, h('div', { class: 'eyebrow', text: 'The Floor' }),
         h('h2', { text: 'Ventures that earned their place.' }),
         h('p', { class: 'lead', text: 'Every venture here was born from one sentence, sealed to its creator, and released on purpose. The Marked ones crossed a real signal threshold.' })),
       h('div', { class: 'floor-section' }, h('h3', { class: 'v-label', text: 'Marked' }), marked),
       h('div', { class: 'floor-section' }, h('h3', { class: 'v-label', text: 'Rising' }), rising),
+      h('div', { class: 'floor-section' }, h('h3', { class: 'v-label', text: 'Open asks' }), reqs),
     );
+    const req = (r) => {
+      const el = h('a', { class: 'req', href: href(`/v/${r.venture.slug}`), 'data-route': `/v/${r.venture.slug}` },
+        h('div', { class: 'from', text: `${r.venture.name}${r.step_n ? ` · step ${r.step_n}` : ''}` }),
+        h('p', { class: 'rt', text: r.title }), r.detail ? h('p', { class: 'rd', text: r.detail }) : null,
+        h('div', { class: 'rm' }, h('span', { text: r.offer_count === 1 ? '1 hand raised' : `${r.offer_count} hands raised` }), h('span', { text: 'I can help →' })));
+      el.style.setProperty('--accent', r.venture.accent);
+      return el;
+    };
     const card = (c) => {
       const el = h('a', { class: 'card', href: href(`/v/${c.slug}`), 'data-route': `/v/${c.slug}` },
         h('div', { class: 'thumb' }, c.image ? h('img', { src: assetUrl(c.image), alt: '', loading: 'lazy' }) : null),
         h('div', { class: 'name', text: c.name }), h('div', { class: 'tag', text: c.tagline }),
-        h('div', { class: 'meta' }, h('span', { text: c.category || '' }), h('span', {}, h('b', { text: String(c.signals.total) }), ` signal${c.signals.total === 1 ? '' : 's'}`)));
+        h('div', { class: 'meta' }, h('span', { text: c.category || '' }), h('span', {}, h('b', { text: String(c.signals.total) }), ` signal${c.signals.total === 1 ? '' : 's'}`)),
+        c.path ? h('div', { class: 'meta' }, h('span', { text: c.path.tier_label }), h('span', { class: 'prog', text: `${c.path.done}/${c.path.total} steps` })) : null);
       el.style.setProperty('--accent', c.accent);
       return el;
     };
@@ -533,6 +749,8 @@
         const data = await api('/api/marketplace');
         marked.replaceChildren(...(data.marked.length ? data.marked.map(card) : [h('p', { class: 'empty', text: 'No venture has earned the Mark yet. The first one will be remembered.' })]));
         rising.replaceChildren(...(data.rising.length ? data.rising.map(card) : [h('p', { class: 'empty' }, 'Nothing released yet — ', h('a', { href: href('/'), 'data-route': '/', text: 'manifest the first one' }), '.')]));
+        const rq = data.requests || [];
+        reqs.replaceChildren(...(rq.length ? rq.map(req) : [h('p', { class: 'empty', text: 'No open asks right now. When a creator needs a shop, a part, or a person, it shows up here.' })]));
       } catch (_) {}
     };
     load(); timer = setInterval(load, 20000);

@@ -27,14 +27,14 @@ import httpx
 
 from .provenance import now_iso
 
-JSON_FIELDS = ("tiers", "roadmap", "grounding", "image_prompts", "images")
+JSON_FIELDS = ("tiers", "roadmap", "grounding", "image_prompts", "images", "path")
 
 VENTURE_COLUMNS = [
     "id", "slug", "owner_token", "idea_raw", "idea_hash", "provenance_code",
     "name", "tagline", "description", "category", "accent",
     "tiers", "roadmap", "grounding", "image_prompts", "images", "images_status",
     "visibility", "status", "signal_count", "buy_count", "build_count", "fund_count",
-    "promoted_at", "released_at", "created_at", "updated_at",
+    "promoted_at", "released_at", "created_at", "updated_at", "path",
 ]
 
 
@@ -113,8 +113,30 @@ class SQLiteStore:
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_ventures_public ON ventures(visibility, promoted_at, signal_count);
+                CREATE TABLE IF NOT EXISTS needs (
+                  id TEXT PRIMARY KEY,
+                  venture_id TEXT NOT NULL,
+                  step_n INTEGER,
+                  title TEXT NOT NULL,
+                  detail TEXT,
+                  status TEXT DEFAULT 'open',
+                  offer_count INTEGER DEFAULT 0,
+                  created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS offers (
+                  id TEXT PRIMARY KEY,
+                  need_id TEXT NOT NULL,
+                  email TEXT NOT NULL,
+                  name TEXT,
+                  message TEXT,
+                  created_at TEXT NOT NULL,
+                  UNIQUE(need_id, email)
+                );
                 """
             )
+            cols = {r[1] for r in self._db.execute("PRAGMA table_info(ventures)").fetchall()}
+            if "path" not in cols:
+                self._db.execute("ALTER TABLE ventures ADD COLUMN path TEXT")
             self._db.commit()
 
     # -- helpers ------------------------------------------------------------
@@ -233,6 +255,60 @@ class SQLiteStore:
             return True
         except sqlite3.IntegrityError:
             return False
+
+    # -- needs + offers (asks for help, and real people answering) -----------
+    async def create_need(self, venture_id: str, step_n: int | None, title: str, detail: str) -> dict:
+        nid = _new_id()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO needs (id, venture_id, step_n, title, detail, status, offer_count, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                [nid, venture_id, step_n, title, detail, "open", 0, now_iso()],
+            )
+            self._db.commit()
+        return await self.get_need(nid)
+
+    async def get_need(self, need_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM needs WHERE id = ?", [need_id]).fetchone()
+        return dict(row) if row else None
+
+    async def list_needs(self, venture_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM needs WHERE venture_id = ? ORDER BY created_at", [venture_id]).fetchall()
+        return [dict(r) for r in rows]
+
+    async def set_need_status(self, need_id: str, status: str) -> None:
+        with self._lock:
+            self._db.execute("UPDATE needs SET status = ? WHERE id = ?", [status, need_id])
+            self._db.commit()
+
+    async def list_open_needs(self, limit: int = 40) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT n.*, v.slug AS venture_slug, v.name AS venture_name, v.accent AS venture_accent
+                   FROM needs n JOIN ventures v ON v.id = n.venture_id
+                   WHERE n.status = 'open' AND v.visibility = 'public'
+                   ORDER BY n.created_at DESC LIMIT ?""", [limit]).fetchall()
+        return [dict(r) for r in rows]
+
+    async def add_offer(self, need_id: str, email: str, name: str, message: str) -> bool:
+        try:
+            with self._lock:
+                self._db.execute(
+                    "INSERT INTO offers (id, need_id, email, name, message, created_at) VALUES (?,?,?,?,?,?)",
+                    [_new_id(), need_id, email.lower(), name, message, now_iso()],
+                )
+                self._db.execute("UPDATE needs SET offer_count = (SELECT COUNT(*) FROM offers WHERE need_id = ?) WHERE id = ?",
+                                 [need_id, need_id])
+                self._db.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    async def list_offers(self, need_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM offers WHERE need_id = ? ORDER BY created_at", [need_id]).fetchall()
+        return [dict(r) for r in rows]
 
     # -- renders ------------------------------------------------------------
     async def save_render(self, venture_id: str, idx: int, png: bytes) -> str:
@@ -367,6 +443,50 @@ class SupabaseStore:
             if "23505" in str(e) or "duplicate" in str(e).lower():
                 return False
             raise
+
+    # -- needs + offers ------------------------------------------------------
+    async def create_need(self, venture_id: str, step_n: int | None, title: str, detail: str) -> dict:
+        data = await self._rest("POST", "needs", json_body={"venture_id": venture_id, "step_n": step_n, "title": title,
+                                                            "detail": detail}, prefer="return=representation")
+        return data[0]
+
+    async def get_need(self, need_id: str) -> dict | None:
+        data = await self._rest("GET", "needs", params={"id": f"eq.{need_id}", "limit": 1})
+        return data[0] if data else None
+
+    async def list_needs(self, venture_id: str) -> list[dict]:
+        return await self._rest("GET", "needs", params={"venture_id": f"eq.{venture_id}", "order": "created_at.asc"}) or []
+
+    async def set_need_status(self, need_id: str, status: str) -> None:
+        await self._rest("PATCH", "needs", params={"id": f"eq.{need_id}"}, json_body={"status": status}, prefer="return=minimal")
+
+    async def list_open_needs(self, limit: int = 40) -> list[dict]:
+        rows = await self._rest("GET", "needs", params={
+            "status": "eq.open", "order": "created_at.desc", "limit": limit,
+            "select": "*,ventures!inner(slug,name,accent,visibility)", "ventures.visibility": "eq.public",
+        }) or []
+        out = []
+        for r in rows:
+            v = r.pop("ventures", None) or {}
+            r.update(venture_slug=v.get("slug"), venture_name=v.get("name"), venture_accent=v.get("accent"))
+            out.append(r)
+        return out
+
+    async def add_offer(self, need_id: str, email: str, name: str, message: str) -> bool:
+        try:
+            await self._rest("POST", "offers", json_body={"need_id": need_id, "email": email.lower(), "name": name,
+                                                          "message": message}, prefer="return=minimal")
+        except RuntimeError as e:
+            if "23505" in str(e) or "duplicate" in str(e).lower():
+                return False
+            raise
+        offers = await self.list_offers(need_id)
+        await self._rest("PATCH", "needs", params={"id": f"eq.{need_id}"}, json_body={"offer_count": len(offers)},
+                         prefer="return=minimal")
+        return True
+
+    async def list_offers(self, need_id: str) -> list[dict]:
+        return await self._rest("GET", "offers", params={"need_id": f"eq.{need_id}", "order": "created_at.asc"}) or []
 
     async def save_render(self, venture_id: str, idx: int, png: bytes) -> str:
         data, ext, mime = await asyncio.to_thread(compress_render, png)

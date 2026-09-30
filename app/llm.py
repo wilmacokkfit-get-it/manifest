@@ -209,3 +209,83 @@ def _mock_png(accent: str, seed: int = 0, size: int = 512) -> bytes:
         + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
         + chunk(b"IEND", b"")
     )
+
+# ---------------------------------------------------------------------------
+# The Path: a chosen tier turned into a step-by-step build guide
+# ---------------------------------------------------------------------------
+
+PATH_SYSTEM_PROMPT = """You are the engine inside MANIFEST. A real person has picked ONE way to build their venture and now needs to be walked through it, step by step, like a seasoned operator sitting next to them.
+
+You return ONE JSON object and nothing else. No prose, no code fences. Plain, specific, concrete. Forbidden words: revolutionary, seamless, cutting-edge, game-changing, empower, leverage, unlock, next-generation, innovative, disrupt, ecosystem, synergy, elevate.
+
+Rules for honesty: name real, well-known companies, marketplaces, and tools only when you are confident they exist and do this kind of work. When unsure, describe the TYPE of supplier and give a search phrase instead of inventing a name. Never invent prices for specific vendors; give rough ranges and say they are rough.
+
+Produce the keys IN THIS EXACT ORDER:
+
+"first_move": one sentence. The single thing to do tonight, in under an hour, with what they already have.
+"steps": array of 5 to 7 objects, in the order they should be done. Each object has, in this order:
+  "title": 3-7 words, imperative.
+  "why": one sentence on why this step comes now.
+  "how": array of 3-4 strings. Each is one concrete action a beginner can do, with the exact tool, site, or person type named.
+  "suppliers": array of 0-3 objects {"kind": type of supplier or resource (e.g. "Investment casting shop", "Powder coater", "Shopify theme"), "examples": array of 0-3 real, well-known names you are confident about (may be empty), "search": a short phrase to type into Google or a marketplace to find local or online options}.
+  "cost": rough dollar range as a short string, or "Free".
+  "time": rough duration as a short string.
+  "done_when": one sentence describing the concrete evidence this step is finished.
+"watch_out": one sentence on the most common way people blow this specific plan.
+"""
+
+
+def _path_user_message(venture: dict, tier_index: int) -> str:
+    tier = (venture.get("tiers") or [{}] * 3)[tier_index]
+    roadmap = "\n".join(f"{r.get('step')}. {r.get('action')} ({r.get('where')})" for r in venture.get("roadmap") or [])
+    g = venture.get("grounding") or {}
+    return (
+        f"Venture: {venture.get('name')} — {venture.get('tagline')}\n"
+        f"What it is: {venture.get('description')}\n"
+        f"Category: {venture.get('category')}\n\n"
+        f"The person chose this path: {tier.get('label')} — {tier.get('title')}\n{tier.get('description')}\n\n"
+        f"Original five-step sketch:\n{roadmap}\n\n"
+        f"What already exists: {g.get('exists')}\nWho pays: {g.get('who_pays')}\nFirst hundred dollars: {g.get('first_hundred')}\n\n"
+        "Return the JSON object now. Start with { and end with }. No prose, no code fences."
+    )
+
+
+async def stream_path_text(venture: dict, tier_index: int) -> AsyncIterator[str]:
+    provider = text_provider()
+    msg = _path_user_message(venture, tier_index)
+    if provider == "anthropic":
+        import anthropic
+        client = anthropic.AsyncAnthropic()
+        model = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
+        async with client.messages.stream(model=model, max_tokens=3500, system=PATH_SYSTEM_PROMPT,
+                                          messages=[{"role": "user", "content": msg}]) as stream:
+            async for text in stream.text_stream:
+                yield text
+    elif provider == "openai":
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI()
+        model = os.environ.get("LLM_MODEL", "gpt-5-mini")
+        stream = await client.responses.create(model=model, instructions=PATH_SYSTEM_PROMPT, input=msg, stream=True)
+        async for event in stream:
+            if getattr(event, "type", "") == "response.output_text.delta":
+                yield event.delta
+    else:
+        text = json.dumps(MOCK_PATH)
+        for i in range(0, len(text), 24):
+            await asyncio.sleep(0.02)
+            yield text[i:i + 24]
+
+
+MOCK_PATH = {
+    "first_move": "Bend one hook tonight from a piece of 3/8 inch rod and hang a full bucket on it.",
+    "steps": [
+        {"title": "Make ten by hand", "why": "You need something real in painters' hands before you spend a dollar on tooling.",
+         "how": ["Buy 3/8 inch mild steel rod at a farm store or Menards.", "Bend around a 2 inch pipe in a vise; weld the gate tab.", "Rattle-can or ask a local powder coater for a batch price."],
+         "suppliers": [{"kind": "Local weld or fab shop", "examples": [], "search": "welding shop near me"}],
+         "cost": "$60-150", "time": "One weekend", "done_when": "Ten hooks, each holding 60 lb for a full minute."},
+        {"title": "Put them on ladders", "why": "Feedback from the first ten users decides the shape of everything after.",
+         "how": ["Stand at a paint counter Monday 6:30am and hand hooks to crews.", "Ask one question: what would make you pay $30 for this?", "Write every answer in your phone."],
+         "suppliers": [], "cost": "Free", "time": "One morning", "done_when": "Ten crews have a hook and you have ten answers."},
+    ],
+    "watch_out": "Ordering tooling before a stranger has paid you money.",
+}

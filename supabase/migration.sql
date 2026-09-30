@@ -66,3 +66,33 @@ alter table public.waitlist enable row level security;
 insert into storage.buckets (id, name, public)
 values ('renders', 'renders', true)
 on conflict (id) do nothing;
+
+
+-- v2: the Path (chosen tier + step-by-step guide), asks (needs) and offers
+alter table public.ventures add column if not exists path jsonb;
+
+create table if not exists public.needs (
+  id uuid primary key default gen_random_uuid(),
+  venture_id uuid not null references public.ventures(id) on delete cascade,
+  step_n integer,
+  title text not null,
+  detail text,
+  status text not null default 'open',
+  offer_count integer not null default 0,
+  created_at timestamptz not null default now()
+);
+create index if not exists needs_venture_idx on public.needs(venture_id);
+create index if not exists needs_status_idx on public.needs(status);
+
+create table if not exists public.offers (
+  id uuid primary key default gen_random_uuid(),
+  need_id uuid not null references public.needs(id) on delete cascade,
+  email text not null,
+  name text,
+  message text,
+  created_at timestamptz not null default now(),
+  unique(need_id, email)
+);
+
+alter table public.needs enable row level security;
+alter table public.offers enable row level security;
