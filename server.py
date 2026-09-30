@@ -75,6 +75,12 @@ ANTHROPIC_KEY_VAR = "CUSTOM_CRED_API_ANTHROPIC_COM_PROXY_AUTH_KEY"
 OPENAI_URL_VAR = "CUSTOM_CRED_API_OPENAI_COM_URL"
 OPENAI_KEY_VAR = "CUSTOM_CRED_API_OPENAI_COM_PROXY_AUTH_KEY"
 _wire_credentials()
+# The preview iframe cannot hold cookies, so its proxy sends a stable X-Visitor-Id. That header is only
+# trusted in the dev sandbox / preview. Once published (credentials injected), the client could set it, so
+# identity comes from the __Host- cookie alone.
+PUBLISHED = bool(os.environ.get(ANTHROPIC_KEY_VAR) or os.environ.get(OPENAI_KEY_VAR))
+TRUST_VISITOR_HEADER = (os.environ.get("TRUST_VISITOR_HEADER", "auto") == "1") or (
+    os.environ.get("TRUST_VISITOR_HEADER", "auto") == "auto" and not PUBLISHED)
 
 from app import llm  # noqa: E402
 from app.partial_json import parse_partial  # noqa: E402
@@ -120,7 +126,7 @@ _hits: dict[str, deque] = defaultdict(deque)
 
 def _caller_id(request: Request) -> str:
     vid = request.headers.get("x-visitor-id")
-    if vid:
+    if vid and TRUST_VISITOR_HEADER:
         return f"v:{vid}"
     fwd = request.headers.get("x-forwarded-for")
     ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
@@ -151,7 +157,9 @@ def _owner_token(request: Request) -> str:
     """Who is this? Prefer the hosting proxy's stable visitor id, then our own
     first-party cookie (set by the middleware below), never anything the page
     can forge from JavaScript."""
-    return request.headers.get("x-visitor-id") or request.state.owner
+    if TRUST_VISITOR_HEADER and request.headers.get("x-visitor-id"):
+        return request.headers["x-visitor-id"]
+    return request.state.owner
 
 
 @app.middleware("http")
@@ -163,7 +171,7 @@ async def _identity_cookie(request: Request, call_next):
         token, fresh = new_token(), True
     request.state.owner = token
     response = await call_next(request)
-    if fresh and not request.headers.get("x-visitor-id"):
+    if fresh and not (TRUST_VISITOR_HEADER and request.headers.get("x-visitor-id")):
         response.set_cookie(COOKIE, token, max_age=60 * 60 * 24 * 365 * 2, httponly=True,
                             samesite="lax", secure=True, path="/")
     return response
@@ -695,9 +703,10 @@ async def venture_page(slug: str, request: Request):
     return _shell(og)
 
 
-if (ROOT / "data" / "renders").exists() or store.kind == "sqlite":
-    (ROOT / "data" / "renders").mkdir(parents=True, exist_ok=True)
-    app.mount("/renders", StaticFiles(directory=ROOT / "data" / "renders"), name="renders")
+DATA_DIR = Path(os.environ.get("MANIFEST_DATA_DIR", ROOT / "data"))
+if (DATA_DIR / "renders").exists() or store.kind == "sqlite":
+    (DATA_DIR / "renders").mkdir(parents=True, exist_ok=True)
+    app.mount("/renders", StaticFiles(directory=DATA_DIR / "renders"), name="renders")
 app.mount("/", StaticFiles(directory=PUBLIC, html=False), name="public")
 
 
