@@ -2,7 +2,7 @@
 
 One sentence in. A venture out.
 
-Type a sentence, watch the name appear inside the orb, then the tagline, the three ways to build it, the five-step plan, the honest grounding, and three product renders fading in while you read. Every venture is private by default, sealed with a SHA-256 provenance record, and only becomes public when its creator clicks Release. Once public, real people can leave one of three signals (I'd buy this / I'd build this / I'd fund this). Enough real signals and it earns the Mark and steps onto the Floor.
+Type a sentence, watch the name appear inside the orb, then the tagline, the three ways to build it, the five-step plan, the honest grounding, and two product renders fading in while you read. Every venture is private by default, sealed with a SHA-256 provenance record, and only becomes public when its creator clicks Release. Once public, real people can leave one of three signals (I'd buy this / I'd build this / I'd fund this). Enough real signals and it earns the Mark and steps onto the Floor.
 
 Then the creator picks a path. One of the three ways to build it becomes a step-by-step guide written by the engine: what to do, why, suggested suppliers to call (labeled as suggestions, not vetted), rough cost and time, and what "done" looks like. The creator checks steps off, keeps notes, and when stuck posts an ask to the Floor. Real people raise a hand with a real email. Marketplace and Shark Tank in one page.
 
@@ -38,64 +38,62 @@ Run command, everywhere: `uvicorn server:app --host 0.0.0.0 --port 8000`
 
 ## Set it up on Replit, click by click
 
-You will need: an Anthropic API key (text), an OpenAI API key (renders), and your Supabase service role key. About 15 minutes.
+You need one OpenAI API key. About 10 minutes. Everything runs on your key and your Replit account; nothing else bills you.
 
 ### 1. Create the Repl
 
 1. Go to replit.com and sign in.
-2. Click **Create Repl**.
+2. Click **Create Repl** (or **+ Create**).
 3. Pick the **Python** template. Name it `manifest`. Click **Create Repl**.
 
 ### 2. Upload the code
 
-1. Unzip `manifest-v2.zip` on your computer.
-2. In the Replit file panel (left side), click the three dots next to the folder name, then **Upload folder**.
-3. Upload the whole `manifest` folder's contents so `server.py` sits at the top level of the Repl (not inside a `manifest/` subfolder). If it lands in a subfolder, drag the files up one level.
+1. Unzip `manifest-v2.zip` on your computer. You get a folder named `manifest`.
+2. In the Replit file panel (left side), click the three dots next to the top folder, then **Upload folder**. Pick the `manifest` folder.
+3. If the files landed inside a `manifest/` subfolder, select them all and drag them up one level so `server.py` sits at the top of the Repl.
 4. Delete Replit's default `main.py` if it is there.
+5. The zip includes a `.replit` file with the run command already set, so Replit knows how to start it. If Replit asks whether to overwrite `.replit`, say yes.
 
-### 3. Tell Replit how to run it
+### 3. Install packages
 
-1. Click the `.replit` file (turn on "Show hidden files" from the three-dot menu if you do not see it).
-2. Replace the `run` line with:
-   ```
-   run = "uvicorn server:app --host 0.0.0.0 --port 8000"
-   ```
-3. Open the **Shell** tab and run:
-   ```
-   pip install -r requirements.txt
-   ```
+Open the **Shell** tab (bottom) and run:
+```
+pip install -r requirements.txt
+```
 
 ### 4. Add your secrets
 
-Click the padlock icon (**Secrets**) in the left toolbar and add these one at a time. Copy the names exactly.
+Click the padlock icon (**Secrets**) in the left toolbar. Add these one at a time, key on the left, value on the right. Copy the names exactly.
 
-| Key | Value | Where to get it |
+| Key | Value | Notes |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | your key | console.anthropic.com → Settings → API Keys → Create Key |
-| `LLM_PROVIDER` | `anthropic` | |
-| `LLM_MODEL` | `claude-sonnet-4-5` | |
-| `OPENAI_API_KEY` | your key | platform.openai.com → API keys → Create new secret key |
-| `IMAGE_PROVIDER` | `openai` | (set to `none` to skip renders and save money while testing) |
+| `OPENAI_API_KEY` | your key | platform.openai.com → API keys → Create new secret key. Put $10 of credit on the account. |
+| `LLM_PROVIDER` | `openai` | |
+| `LLM_MODEL` | `gpt-5-mini` | writes the ventures and paths, about half a cent each |
+| `IMAGE_PROVIDER` | `openai` | set to `none` to skip renders entirely |
 | `IMAGE_MODEL` | `gpt-image-1` | |
-| `SUPABASE_URL` | `https://lvtehfciwiiakpdtwlyx.supabase.co` | |
-| `SUPABASE_SERVICE_ROLE_KEY` | your key | supabase.com → your **Manifest** project → **Project Settings** (gear) → **API Keys** → the **service_role** key (click Reveal). Never put this in the front end. |
-| `PUBLIC_URL` | `https://manifest-yourname.replit.app` | Your Repl's public address. Replit shows it after the first deploy. Update it once you know it. |
+| `IMAGE_QUALITY` | `medium` | `low` is 1 cent a render, `medium` 4 cents |
+| `RENDER_COUNT` | `2` | renders per venture, 0 to 3 |
+| `PUBLIC_URL` | `https://manifest-yourname.replit.app` | your Repl's public address; fill it in after step 6 |
 
-Optional knobs (defaults in parentheses): `GEN_PER_HOUR` (3), `GEN_PER_DAY` (8), `GLOBAL_PER_DAY` (150), `MARK_THRESHOLD_SIGNALS` (25), `MARK_THRESHOLD_BUILD_FUND` (5).
+Spend knobs (optional, defaults shown): `GEN_PER_HOUR` 3, `GEN_PER_DAY` 8, `GLOBAL_PER_DAY` 150. At two medium renders a venture costs about 9 cents, so 150 a day is a $14 worst case. Set `GLOBAL_PER_DAY` to `50` for a $5 ceiling.
 
-Leave `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` blank if you just want to test with the built-in SQLite file first.
+Want Claude writing the text instead? Add `ANTHROPIC_API_KEY`, set `LLM_PROVIDER` to `anthropic` and `LLM_MODEL` to `claude-sonnet-4-5`. Renders still use OpenAI.
 
 ### 5. Run it
 
-1. Click **Run**. The Webview should show the orb.
-2. Type a sentence and click **Manifest it**. The name should appear in the orb within a few seconds; the full page in about half a minute; renders trail in after that.
-3. Open `/api/health` in the Webview to confirm `"store": "supabase"` once your keys are in.
+1. Click **Run**. The Webview shows the orb.
+2. Type a sentence and hit **Manifest it**. Name in a few seconds, full page in about half a minute, two renders trail in after.
+3. Open `/api/health` in the Webview to see the store and provider in use.
 
-### 6. Deploy so the world can see it
+### 6. Deploy so people can use it
 
-1. Click **Deploy** (top right) → **Autoscale** (or Reserved VM if you want it always warm).
-2. Run command: `uvicorn server:app --host 0.0.0.0 --port 8000`
-3. Deploy. Copy the `.replit.app` URL it gives you and paste it into the `PUBLIC_URL` secret. Redeploy once so share cards use the right address.
+1. Click **Deploy** (top right) → **Autoscale**. Autoscale sleeps when nobody is there, so it is the cheap option.
+2. Leave the run command as `uvicorn server:app --host 0.0.0.0 --port 8000`. Deploy.
+3. Copy the `.replit.app` address it gives you, paste it into the `PUBLIC_URL` secret, and click **Redeploy** once so share links and link-preview cards use the right address.
+4. Send the link. Ventures, the Floor, signals, paths, asks and offers all work. The Floor starts empty, and the first venture on it will be real.
+
+**About the database.** By default everything is saved in a SQLite file inside the Repl (`data/manifest.db`). That survives restarts and redeploys on Replit as long as you do not delete the folder, and it is fine for hundreds of ventures. When you want the durable option, add `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` as secrets and run the v2 migration described below.
 
 ---
 

@@ -31,6 +31,7 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
+        v = re.split(r"\s+#", v, maxsplit=1)[0]          # allow trailing comments like KEY=value   # note
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
@@ -79,8 +80,7 @@ _wire_credentials()
 # trusted in the dev sandbox / preview. Once published (credentials injected), the client could set it, so
 # identity comes from the __Host- cookie alone.
 PUBLISHED = bool(os.environ.get(ANTHROPIC_KEY_VAR) or os.environ.get(OPENAI_KEY_VAR))
-TRUST_VISITOR_HEADER = (os.environ.get("TRUST_VISITOR_HEADER", "auto") == "1") or (
-    os.environ.get("TRUST_VISITOR_HEADER", "auto") == "auto" and not PUBLISHED)
+TRUST_VISITOR_HEADER = os.environ.get("TRUST_VISITOR_HEADER", "0") == "1" and not PUBLISHED
 
 from app import llm  # noqa: E402
 from app.partial_json import parse_partial  # noqa: E402
@@ -106,6 +106,7 @@ def _index_html() -> str:
 # Config
 # ---------------------------------------------------------------------------
 
+RENDER_COUNT = max(0, min(3, int(os.environ.get("RENDER_COUNT", "2"))))   # product renders per venture
 GEN_PER_HOUR = int(os.environ.get("GEN_PER_HOUR", "3"))
 GEN_PER_DAY = int(os.environ.get("GEN_PER_DAY", "8"))
 GLOBAL_PER_DAY = int(os.environ.get("GLOBAL_PER_DAY", "150"))
@@ -198,6 +199,7 @@ def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: 
         "roadmap": v.get("roadmap") or [],
         "grounding": v.get("grounding") or {},
         "images": v.get("images") or [],
+        "render_count": len(v.get("image_prompts") or []),
         "images_status": v.get("images_status", "pending"),
         "visibility": v.get("visibility", "private"),
         "status": v.get("status"),
@@ -268,7 +270,7 @@ def _normalize(data: dict) -> dict:
     accent = str(data.get("accent") or "#e8eeff")
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", accent):
         accent = "#e8eeff"
-    prompts = [str(p) for p in (data.get("image_prompts") or []) if isinstance(p, str)][:3]
+    prompts = [str(p) for p in (data.get("image_prompts") or []) if isinstance(p, str)][:RENDER_COUNT]
     return {
         "name": str(data.get("name") or "Untitled").strip()[:60],
         "tagline": str(data.get("tagline") or "").strip()[:160],

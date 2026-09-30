@@ -40,7 +40,7 @@ Produce the keys IN THIS EXACT ORDER:
    "exists": the closest thing that already exists, named. If something very similar exists, say so plainly.
    "who_pays": the exact buyer and a realistic price point.
    "first_hundred": how the first one hundred dollars of revenue would actually happen, step by step in one or two sentences.
-"image_prompts": array of exactly 3 strings, each a detailed prompt for a photorealistic product render. No text, logos, or words in the image. [1] the product alone on a dark studio backdrop with soft rim lighting; [2] the product in realistic use by a person in its real environment; [3] a close detail, material, or packaging shot. Describe form, material, color (use the accent color), scale, and lighting.
+"image_prompts": array of exactly 2 strings, each a detailed prompt for a photorealistic product render. No text, logos, or words in the image. [1] the product alone on a dark studio backdrop with soft rim lighting; [2] the product in realistic use by a person in its real environment. Describe form, material, color (use the accent color), scale, and lighting.
 
 If the idea is weak or already exists, still build the best honest version of it and say the truth in grounding. Never flatter.
 
@@ -201,7 +201,8 @@ async def generate_render(prompt: str, accent: str = "#e8eeff") -> bytes | None:
 
         client = AsyncOpenAI()
         model = os.environ.get("IMAGE_MODEL", "gpt-image-1")
-        result = await client.images.generate(model=model, prompt=prompt, size="1024x1024", quality="medium", n=1)
+        quality = os.environ.get("IMAGE_QUALITY", "medium")   # low ($0.011) | medium ($0.042) | high
+        result = await client.images.generate(model=model, prompt=prompt, size="1024x1024", quality=quality, n=1)
         import base64
 
         return base64.b64decode(result.data[0].b64_json)

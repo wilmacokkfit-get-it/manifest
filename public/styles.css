@@ -114,6 +114,8 @@ footer a{color:var(--fg-50)}
 .render-grid{display:grid;grid-template-columns:1.6fr 1fr;grid-template-rows:1fr 1fr;gap:14px;height:min(62vw,540px)}
 .render{position:relative;border-radius:16px;overflow:hidden;background:linear-gradient(140deg,rgba(255,255,255,.05),rgba(255,255,255,.012));border:1px solid var(--line-soft)}
 .render:first-child{grid-row:1/3}
+.render-grid.two{grid-template-columns:1.25fr 1fr;grid-template-rows:1fr;height:min(48vw,420px)}
+.render-grid.two .render:first-child{grid-row:auto}
 .render img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transform:scale(1.03);transition:opacity 1.4s var(--ease),transform 1.6s var(--ease)}
 .render img.on{opacity:1;transform:none}
 .render .shimmer{position:absolute;inset:0;background:linear-gradient(100deg,transparent 30%,rgba(255,255,255,.05) 50%,transparent 70%);background-size:220% 100%;animation:shimmer 2.2s linear infinite}

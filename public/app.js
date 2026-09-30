@@ -239,9 +239,15 @@
     const head = h('header', { class: 'v-head' }, prov, name, tagline, desc, cat);
 
     // renders
-    const renderSlots = [0, 1, 2].map(() => h('div', { class: 'render' }, h('div', { class: 'shimmer' }), h('img', { alt: '' })));
+    const renderSlots = [];
+    const renderGrid = h('div', { class: 'render-grid' });
     const renderStatus = h('p', { class: 'render-status', text: 'Rendering the product…' });
-    const renders = h('div', { class: 'renders hidden' }, h('h2', { class: 'v-label', text: 'Product renders' }), h('div', { class: 'render-grid' }, renderSlots), renderStatus);
+    const renders = h('div', { class: 'renders hidden' }, h('h2', { class: 'v-label', text: 'Product renders' }), renderGrid, renderStatus);
+    function ensureSlots(n) {
+      n = Math.max(1, Math.min(3, n || 2));
+      while (renderSlots.length < n) { const s = h('div', { class: 'render' }, h('div', { class: 'shimmer' }), h('img', { alt: '' })); renderSlots.push(s); renderGrid.append(s); }
+      renderGrid.classList.toggle('two', renderSlots.length === 2);
+    }
 
     // tiers
     const tierEls = [];
@@ -332,12 +338,13 @@
           setText(gEls[k], d.grounding[k], isLast);
         });
       }
-      if (d.image_prompts && !streaming) show(renders);
+      if (d.image_prompts && !streaming) { ensureSlots(Array.isArray(d.image_prompts) ? d.image_prompts.length : 2); show(renders); }
     }
 
     // ---- full record (after done, or loaded from the API) ----
     function complete(v) {
       venture = v;
+      ensureSlots(v.render_count || (v.images || []).length || 2);
       update({ ...v, image_prompts: true }, null);
       [tagline, desc, ...Object.values(gEls)].forEach(el => el.classList.remove('caret'));
       root.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
@@ -370,7 +377,7 @@
         renderSlots.forEach(s => { if (!s.classList.contains('done')) s.classList.add('done'); });
       } else {
         const n = (v.images || []).filter(Boolean).length;
-        renderStatus.textContent = n ? `${n} of 3 renders in…` : 'Rendering the product…';
+        renderStatus.textContent = n ? `${n} of ${renderSlots.length} renders in…` : 'Rendering the product…';
       }
     }
 
