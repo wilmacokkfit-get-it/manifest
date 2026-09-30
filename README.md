@@ -4,6 +4,8 @@ One sentence in. A venture out.
 
 Type a sentence, watch the name appear inside the orb, then the tagline, the three ways to build it, the five-step plan, the honest grounding, and three product renders fading in while you read. Every venture is private by default, sealed with a SHA-256 provenance record, and only becomes public when its creator clicks Release. Once public, real people can leave one of three signals (I'd buy this / I'd build this / I'd fund this). Enough real signals and it earns the Mark and steps onto the Floor.
 
+Then the creator picks a path. One of the three ways to build it becomes a step-by-step guide written by the engine: what to do, why, suggested suppliers to call (labeled as suggestions, not vetted), rough cost and time, and what "done" looks like. The creator checks steps off, keeps notes, and when stuck posts an ask to the Floor. Real people raise a hand with a real email. Marketplace and Shark Tank in one page.
+
 There are no fake numbers anywhere in this product. Every count you see is a row in the database that a real person created.
 
 ---
@@ -25,7 +27,7 @@ manifest/
     styles.css           Design system: near-black, Playfair Display + Inter, breathing orb
     favicon.svg, og-default.png
   supabase/
-    migration.sql        Tables + storage bucket (already applied to your project)
+    migration.sql        Tables + storage bucket (v1 applied; v2 below, run it once)
   requirements.txt
   .env.example           Every setting, explained
 ```
@@ -99,7 +101,15 @@ Leave `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` blank if you just want to t
 
 ## Supabase
 
-The three tables (`ventures`, `signals`, `waitlist`) and the public `renders` storage bucket are already created in your Manifest project. Row Level Security is on and there are no anon policies, so only the server (using the service role key) can read or write. `supabase/migration.sql` is the exact SQL, kept for reference or for a second environment.
+The three v1 tables (`ventures`, `signals`, `waitlist`) and the public `renders` storage bucket are already created in your Manifest project. Row Level Security is on and there are no anon policies, so only the server (using the service role key) can read or write.
+
+**v2 needs one more run.** The Path layer adds a `path` column on `ventures` and two tables, `needs` and `offers`. The Supabase connection timed out when I tried to apply it, so do this once, about a minute:
+
+1. Open your Supabase project, click **SQL Editor** in the left bar, then **New query**.
+2. Open `supabase/migration.sql`, copy everything from the line `-- v2: the Path` to the end, paste it in, click **Run**.
+3. You should see "Success. No rows returned." Done. (Every statement is `if not exists`, so running it twice is harmless.)
+
+If you skip this and use `STORE=supabase`, choosing a path will fail with a column error. SQLite mode needs nothing; it adds the column and tables itself.
 
 ---
 
@@ -113,6 +123,10 @@ The three tables (`ventures`, `signals`, `waitlist`) and the public `renders` st
 
 **Signals.** Three buttons, each needs a real email, one per email per type per venture (enforced by a unique constraint). "I'd buy this" can carry an optional price. Counts are cached on the venture row. When `total >= MARK_THRESHOLD_SIGNALS` or `build + fund >= MARK_THRESHOLD_BUILD_FUND`, the venture gets `promoted_at` and moves to the Marked shelf on the Floor.
 
+**The Path.** `POST /api/ventures/<slug>/path` with `{tier: 0|1|2}` streams a 5-7 step guide the same way the venture streams; the front end shows the first move and each step title as it lands. Steps live in the `path` JSON on the venture: `title, why, how[], suppliers[{kind, examples[], search}], cost, time, done_when, status, note`. The owner PATCHes `/path/steps/<n>` with `{status}` or `{note}`. Re-choosing is blocked (409) once any step has moved; the owner has to Reset first (DELETE `/path`). Supplier names are the model's suggestions; the UI labels them "Suggested by the engine, not vetted" and every one is just a Google search link. Notes are owner-only and stripped from public views.
+
+**Asks and offers.** The owner posts an ask on a step (`POST /needs`, max 12 open per venture). If the venture is public it shows on the Floor under "Open asks." Anyone can raise a hand (`POST /needs/<id>/offers`) with a real email, one per email per ask. Only the owner sees the emails and messages, and can mark the ask filled. Offer counts are real rows, same rule as signals.
+
 **Rate limits.** Per visitor: `GEN_PER_HOUR` and `GEN_PER_DAY`. Whole site: `GLOBAL_PER_DAY`. A hit only counts once a venture is actually created, so a failed generation is free.
 
 **Share pages.** `/v/<slug>` is served by the server with real Open Graph tags (title, description, first render) so links unfurl properly in iMessage, X, Slack. This only works on your own deployment; the Perplexity preview uses `?v=<slug>` links instead.
@@ -125,6 +139,8 @@ The three tables (`ventures`, `signals`, `waitlist`) and the public `renders` st
 - Every venture page says "Written by the engine, not verified."
 - Provenance fine print states plainly what it is and is not.
 - Rate limits and a global cap protect your API bill by default.
+- Suppliers in a path are suggestions from the model, labeled that way, never presented as vetted or partnered.
+- No fake asks or offers. Every "hand raised" is a real email in the `offers` table.
 
 ---
 
