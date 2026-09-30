@@ -127,6 +127,8 @@ If you skip this and use `STORE=supabase`, choosing a path will fail with a colu
 
 **Asks and offers.** The owner posts an ask on a step (`POST /needs`, max 12 open per venture). If the venture is public it shows on the Floor under "Open asks." Anyone can raise a hand (`POST /needs/<id>/offers`) with a real email, one per email per ask. Only the owner sees the emails and messages, and can mark the ask filled. Offer counts are real rows, same rule as signals.
 
+**No repeats.** Every generation gets a random angle (physical product, pro tool, service business, subscription, marketplace, and so on) and a list of this creator's recent names and taglines to avoid. The same sentence twice gives two clearly different ventures.
+
 **Rate limits.** Per visitor: `GEN_PER_HOUR` and `GEN_PER_DAY`. Whole site: `GLOBAL_PER_DAY`. A hit only counts once a venture is actually created, so a failed generation is free.
 
 **Share pages.** `/v/<slug>` is served by the server with real Open Graph tags (title, description, first render) so links unfurl properly in iMessage, X, Slack. This only works on your own deployment; the Perplexity preview uses `?v=<slug>` links instead.

@@ -216,6 +216,19 @@ class SQLiteStore:
             (n,) = self._db.execute("SELECT COUNT(*) FROM ventures WHERE created_at >= ?", [since_iso]).fetchone()
         return int(n)
 
+    async def recent_concepts(self, owner_token: str, limit: int = 12) -> list[dict]:
+        """Names and taglines of this creator's recent ventures plus the latest site-wide, so the engine never repeats itself."""
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT name, tagline, idea_raw FROM ventures
+                WHERE name IS NOT NULL AND (owner_token = ? OR created_at >= datetime('now', '-2 days'))
+                ORDER BY (owner_token = ?) DESC, created_at DESC LIMIT ?
+                """,
+                [owner_token, owner_token, limit],
+            ).fetchall()
+        return [{"name": r["name"], "tagline": r["tagline"], "idea": r["idea_raw"]} for r in rows]
+
     # -- signals ------------------------------------------------------------
     async def add_signal(self, venture_id: str, type_: str, email: str, price: float | None) -> bool:
         try:
@@ -395,6 +408,12 @@ class SupabaseStore:
                 "limit": limit,
             },
         ) or []
+
+    async def recent_concepts(self, owner_token: str, limit: int = 12) -> list[dict]:
+        rows = await self._rest("GET", "ventures", params={
+            "owner_token": f"eq.{owner_token}", "select": "name,tagline,idea_raw",
+            "order": "created_at.desc", "limit": limit}) or []
+        return [{"name": r.get("name"), "tagline": r.get("tagline"), "idea": r.get("idea_raw")} for r in rows if r.get("name")]
 
     async def count_generations_since(self, since_iso: str) -> int:
         r = await self._client.get(

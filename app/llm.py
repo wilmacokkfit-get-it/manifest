@@ -42,7 +42,38 @@ Produce the keys IN THIS EXACT ORDER:
    "first_hundred": how the first one hundred dollars of revenue would actually happen, step by step in one or two sentences.
 "image_prompts": array of exactly 3 strings, each a detailed prompt for a photorealistic product render. No text, logos, or words in the image. [1] the product alone on a dark studio backdrop with soft rim lighting; [2] the product in realistic use by a person in its real environment; [3] a close detail, material, or packaging shot. Describe form, material, color (use the accent color), scale, and lighting.
 
-If the idea is weak or already exists, still build the best honest version of it and say the truth in grounding. Never flatter."""
+If the idea is weak or already exists, still build the best honest version of it and say the truth in grounding. Never flatter.
+
+VARIETY IS MANDATORY. Broad or vague sentences (an industry name, a category, "an app for X", "a money making app") have a hundred possible ventures inside them. Never take the first obvious interpretation. Pick one specific wedge: a specific customer, a specific painful moment in their day, a specific thing they already pay for badly. Where everyone expects software, consider a physical product, a service, a kit, a subscription box, a marketplace, a tool for pros, a franchise, a media brand. If the same sentence were sent twice, the two ventures must be clearly different in customer, form, and name. You will be given an ANGLE to build from and a list of names and concepts to AVOID. Obey both: the angle shapes the venture, and nothing in the avoid list may be reused or lightly reworded."""
+
+ANGLES = [
+    "a physical product you can hold, not software",
+    "a tool or kit for professionals who do this for a living",
+    "a service business a two-person crew could run in one town",
+    "a subscription that shows up every month",
+    "a marketplace connecting two groups who cannot find each other",
+    "something for the beginner who is doing this for the very first time",
+    "something for the person doing this at scale, who has hired staff",
+    "a data or recordkeeping product for a boring but mandatory task",
+    "a consumer brand with a strong look, sold direct",
+    "a piece of hardware that plugs into what people already own",
+    "an unglamorous back-of-house fix for a mess everyone tolerates",
+    "a training, certification, or education product for a skilled trade",
+    "a rental or shared-equipment model instead of ownership",
+    "a safety or compliance product that removes a fine or a risk",
+    "a product for the buyer nobody builds for: rural, small-town, older, or offline",
+]
+
+
+def build_user_message(idea: str, angle: str | None, avoid: list[dict] | None) -> str:
+    parts = [f"The sentence:\n\n{idea}"]
+    if angle:
+        parts.append(f"ANGLE to build from: {angle}.")
+    if avoid:
+        lines = "\n".join(f"- {a.get('name')}: {a.get('tagline') or ''}".rstrip(": ") for a in avoid if a.get("name"))
+        parts.append("AVOID. These ventures already exist for this creator. Do not reuse or lightly reword their names, taglines, or core concepts:\n" + lines)
+    parts.append("Return the JSON object now. Start with { and end with }. No prose, no code fences.")
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -60,20 +91,21 @@ def text_provider() -> str:
     return "mock"
 
 
-async def stream_venture_text(idea: str) -> AsyncIterator[str]:
+async def stream_venture_text(idea: str, angle: str | None = None, avoid: list[dict] | None = None) -> AsyncIterator[str]:
     provider = text_provider()
+    msg = build_user_message(idea, angle, avoid)
     if provider == "anthropic":
-        async for chunk in _stream_anthropic(idea):
+        async for chunk in _stream_anthropic(msg):
             yield chunk
     elif provider == "openai":
-        async for chunk in _stream_openai(idea):
+        async for chunk in _stream_openai(msg):
             yield chunk
     else:
         async for chunk in _stream_mock(idea):
             yield chunk
 
 
-async def _stream_anthropic(idea: str) -> AsyncIterator[str]:
+async def _stream_anthropic(msg: str) -> AsyncIterator[str]:
     import anthropic
 
     client = anthropic.AsyncAnthropic()
@@ -83,14 +115,14 @@ async def _stream_anthropic(idea: str) -> AsyncIterator[str]:
         max_tokens=2200,
         system=SYSTEM_PROMPT,
         messages=[
-            {"role": "user", "content": f"The sentence:\n\n{idea}\n\nReturn the JSON object now. Start with {{ and end with }}. No prose, no code fences."},
+            {"role": "user", "content": msg},
         ],
     ) as stream:
         async for text in stream.text_stream:
             yield text
 
 
-async def _stream_openai(idea: str) -> AsyncIterator[str]:
+async def _stream_openai(msg: str) -> AsyncIterator[str]:
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI()
@@ -98,7 +130,7 @@ async def _stream_openai(idea: str) -> AsyncIterator[str]:
     stream = await client.responses.create(
         model=model,
         instructions=SYSTEM_PROMPT,
-        input=f"The sentence:\n\n{idea}\n\nReturn the JSON object now.",
+        input=msg,
         stream=True,
     )
     async for event in stream:

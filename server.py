@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+import random
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -257,6 +258,8 @@ async def manifest(body: ManifestBody, request: Request):
     owner = _owner_token(request)
     created_at = now_iso()
     prov = mint(idea, created_at, owner)
+    avoid = await store.recent_concepts(owner)
+    angle = random.choice(llm.ANGLES)
 
     async def gen():
         yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at})
@@ -264,7 +267,7 @@ async def manifest(body: ManifestBody, request: Request):
         last_emit = 0.0
         last_key = None
         try:
-            async for chunk in llm.stream_venture_text(idea):
+            async for chunk in llm.stream_venture_text(idea, angle=angle, avoid=avoid):
                 buf += chunk
                 now = time.time()
                 obj, key = parse_partial(buf)
