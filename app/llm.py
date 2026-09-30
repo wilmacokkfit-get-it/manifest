@@ -127,11 +127,13 @@ async def _stream_openai(msg: str) -> AsyncIterator[str]:
 
     client = AsyncOpenAI()
     model = os.environ.get("LLM_MODEL", "gpt-5-mini")
+    kwargs = {"reasoning": {"effort": "low"}} if model.startswith("gpt-5") else {}
     stream = await client.responses.create(
         model=model,
         instructions=SYSTEM_PROMPT,
         input=msg,
         stream=True,
+        **kwargs,
     )
     async for event in stream:
         if getattr(event, "type", "") == "response.output_text.delta":
@@ -297,7 +299,8 @@ async def stream_path_text(venture: dict, tier_index: int) -> AsyncIterator[str]
         from openai import AsyncOpenAI
         client = AsyncOpenAI()
         model = os.environ.get("LLM_MODEL", "gpt-5-mini")
-        stream = await client.responses.create(model=model, instructions=PATH_SYSTEM_PROMPT, input=msg, stream=True)
+        kwargs = {"reasoning": {"effort": "low"}} if model.startswith("gpt-5") else {}
+        stream = await client.responses.create(model=model, instructions=PATH_SYSTEM_PROMPT, input=msg, stream=True, **kwargs)
         async for event in stream:
             if getattr(event, "type", "") == "response.output_text.delta":
                 yield event.delta

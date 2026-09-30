@@ -36,6 +36,46 @@ def _load_dotenv(path: Path) -> None:
 
 _load_dotenv(ROOT / ".env")
 
+
+def _wire_credentials() -> None:
+    """Published on pplx.app, API keys never touch the box. The platform injects a proxy URL and a
+    proxy token per saved credential; map them onto the names the SDKs expect and pick real model ids
+    (the sandbox-only aliases like claude_sonnet_4_6 / nano_banana_2 do not exist outside the sandbox)."""
+    a_url, a_key = os.environ.get(ANTHROPIC_URL_VAR, ""), os.environ.get(ANTHROPIC_KEY_VAR, "")
+    o_url, o_key = os.environ.get(OPENAI_URL_VAR, ""), os.environ.get(OPENAI_KEY_VAR, "")
+    if not (a_key or o_key):
+        return                                    # dev sandbox or Replit: .env rules
+    if o_key:
+        os.environ["OPENAI_API_KEY"] = o_key
+        if o_url:
+            os.environ["OPENAI_BASE_URL"] = o_url.rstrip("/") + ("" if o_url.rstrip("/").endswith("/v1") else "/v1")
+    if a_key:
+        os.environ["ANTHROPIC_API_KEY"] = a_key
+        if a_url:
+            os.environ["ANTHROPIC_BASE_URL"] = a_url.rstrip("/")
+        os.environ["LLM_PROVIDER"] = "anthropic"
+        if os.environ.get("LLM_MODEL", "").startswith("claude_") or not os.environ.get("LLM_MODEL"):
+            os.environ["LLM_MODEL"] = os.environ.get("PROD_LLM_MODEL", "claude-sonnet-4-5")
+    else:                                         # OpenAI only: it writes the text too
+        os.environ["LLM_PROVIDER"] = "openai"
+        if "gpt" not in os.environ.get("LLM_MODEL", "") or "_" in os.environ.get("LLM_MODEL", ""):
+            os.environ["LLM_MODEL"] = os.environ.get("PROD_OPENAI_TEXT_MODEL", "gpt-5-mini")
+    if o_key:
+        os.environ["IMAGE_PROVIDER"] = "openai"
+        if os.environ.get("IMAGE_MODEL", "") in ("", "nano_banana_2", "gpt_image_2", "gpt_image_1_5"):
+            os.environ["IMAGE_MODEL"] = os.environ.get("PROD_IMAGE_MODEL", "gpt-image-1")
+    elif os.environ.get("IMAGE_PROVIDER", "") == "pplx":
+        os.environ["IMAGE_PROVIDER"] = "none"
+    print(f"[boot] credentials wired: text={os.environ['LLM_PROVIDER']}/{os.environ['LLM_MODEL']} images={os.environ.get('IMAGE_PROVIDER')}/{os.environ.get('IMAGE_MODEL')}")
+
+
+# Env var names the hosting platform injects for saved vault credentials.
+ANTHROPIC_URL_VAR = "CUSTOM_CRED_API_ANTHROPIC_COM_URL"
+ANTHROPIC_KEY_VAR = "CUSTOM_CRED_API_ANTHROPIC_COM_PROXY_AUTH_KEY"
+OPENAI_URL_VAR = "CUSTOM_CRED_API_OPENAI_COM_URL"
+OPENAI_KEY_VAR = "CUSTOM_CRED_API_OPENAI_COM_PROXY_AUTH_KEY"
+_wire_credentials()
+
 from app import llm  # noqa: E402
 from app.partial_json import parse_partial  # noqa: E402
 from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
@@ -103,7 +143,8 @@ def _record_hit(caller: str) -> None:
     _hits[caller].append(time.time())
 
 
-COOKIE = "manifest_owner"
+# __Host- prefix: required by the pplx.app proxy (it drops other cookie names) and a good idea anywhere.
+COOKIE = "__Host-manifest_owner"
 
 
 def _owner_token(request: Request) -> str:
@@ -124,7 +165,7 @@ async def _identity_cookie(request: Request, call_next):
     response = await call_next(request)
     if fresh and not request.headers.get("x-visitor-id"):
         response.set_cookie(COOKIE, token, max_age=60 * 60 * 24 * 365 * 2, httponly=True,
-                            samesite="lax", secure=request.url.scheme == "https")
+                            samesite="lax", secure=True, path="/")
     return response
 
 
