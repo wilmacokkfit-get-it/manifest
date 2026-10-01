@@ -109,6 +109,57 @@ class ServerRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(owner.json()["is_owner"])
         self.assertEqual(owner.json()["idea"], row["idea_raw"])
 
+    async def test_private_venture_rejects_unauthorized_plan_and_release_changes(self) -> None:
+        row = await self.store.create_venture(
+            {
+                **private_venture(slug="private-plan-guard"),
+                "path": {
+                    "tier": 0,
+                    "tier_label": "The Lean Build",
+                    "status": "ready",
+                    "steps": [{"n": 1, "title": "Make a prototype.", "status": "todo", "note": "", "done_at": None}],
+                },
+            }
+        )
+        before = await self.store.get_by_slug(row["slug"])
+        self.assertEqual(before["visibility"], "private")
+
+        attempts = [
+            ("POST", f"/api/ventures/{row['slug']}/path", {"json": {"tier": 1}}),
+            ("PATCH", f"/api/ventures/{row['slug']}/path/steps/1", {"json": {"status": "done", "note": "hacked"}}),
+            ("DELETE", f"/api/ventures/{row['slug']}/path", {}),
+            ("POST", f"/api/ventures/{row['slug']}/release", {}),
+        ]
+        callers = {
+            "anonymous": {},
+            "non-owner": {"Cookie": f"{server.COOKIE}=someone-elses-token"},
+        }
+
+        with patch.object(server.llm, "stream_path_text") as stream_path:
+            async with self.client() as client:
+                for caller, headers in callers.items():
+                    for method, url, kwargs in attempts:
+                        response = await client.request(method, url, headers=headers, **kwargs)
+                        with self.subTest(caller=caller, method=method, url=url):
+                            # Private ventures must not leak their existence to outsiders.
+                            self.assertEqual(response.status_code, 404)
+                            self.assertNotIn("event:", response.text)
+                            after = await self.store.get_by_slug(row["slug"])
+                            self.assertEqual(after, before)
+
+        stream_path.assert_not_called()
+        self.assertEqual(await self.store.list_public(), [])
+
+        # The owner still has full control over their own plan.
+        async with self.client() as client:
+            owner = await client.patch(
+                f"/api/ventures/{row['slug']}/path/steps/1",
+                json={"status": "doing"},
+                headers={"Cookie": f"{server.COOKIE}=owner-token-for-test"},
+            )
+        self.assertEqual(owner.status_code, 200)
+        self.assertEqual(owner.json()["path"]["steps"][0]["status"], "doing")
+
     async def test_explicit_openai_selection_fails_cleanly_without_credentials(self) -> None:
         with patch.dict(os.environ, {"LLM_PROVIDER": "openai"}, clear=False):
             os.environ.pop("OPENAI_API_KEY", None)
