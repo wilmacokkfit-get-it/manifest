@@ -1,0 +1,1 @@
+- [Python hook environment](python-hook-environment.md) — system pip and sysconfig can resolve to immutable Nix paths even when the project-local Python launcher is active.

@@ -8,6 +8,10 @@ This imported project keeps its original FastAPI backend, vanilla HTML/CSS/JS fr
 - Python dependencies are listed in `requirements.txt`.
 - SQLite data and locally generated images live under `data/`, which is ignored by Git. Do not delete this folder if you need to retain workspace data.
 
+## After task merges
+
+The configured hook `scripts/post-merge.sh` installs `requirements.txt` into the project-local Python package directory and runs `python -m unittest discover -s tests -v`. It is non-interactive and stops on failure. Replit handles workflow reconciliation after the hook succeeds. The tests use disposable storage, not workspace data.
+
 ## AI configuration
 
 Real text and image generation require `OPENAI_API_KEY` in Replit Secrets. The shared settings use `LLM_PROVIDER=openai`, `LLM_MODEL=gpt-5-mini`, `IMAGE_PROVIDER=openai`, and `IMAGE_MODEL=gpt-image-1`. Generation uses the connected OpenAI account's credits. Never put keys in source files or chat.
