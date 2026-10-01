@@ -105,6 +105,78 @@ async def stream_venture_text(idea: str, angle: str | None = None, avoid: list[d
             yield chunk
 
 
+REFINEMENT_SYSTEM_PROMPT = SYSTEM_PROMPT.split("\n\nVARIETY IS MANDATORY.", 1)[0] + """
+
+REFINEMENT REQUEST: The user already has a generated venture. Improve and adapt THAT SAME venture using the original idea, its existing generated content, and the user's new context. Do not replace it with an unrelated randomized concept. Keep its central product, customer, and intent recognizable unless the user's context specifically calls for a correction. Return the complete venture JSON in the exact schema above, including all tiers, roadmap, grounding, and image_prompts.
+"""
+
+
+def _refinement_user_message(venture: dict, context: str) -> str:
+    existing = {
+        key: venture.get(key)
+        for key in (
+            "name", "tagline", "description", "category", "accent", "tiers",
+            "roadmap", "grounding", "image_prompts",
+        )
+    }
+    grounding = dict(existing.get("grounding") or {})
+    grounding.pop("_refinement", None)
+    existing["grounding"] = grounding
+    return (
+        "Original idea:\n" + str(venture.get("idea_raw") or "") + "\n\n"
+        "Existing generated venture (refine this, do not start over):\n"
+        + json.dumps(existing, ensure_ascii=False)
+        + "\n\nNew context from the creator:\n"
+        + context
+        + "\n\nReturn the complete refined venture JSON now. Start with { and end with }. No prose, no code fences."
+    )
+
+
+async def stream_refinement_text(venture: dict, context: str) -> AsyncIterator[str]:
+    provider = text_provider()
+    msg = _refinement_user_message(venture, context)
+    if provider == "anthropic":
+        import anthropic
+
+        client = anthropic.AsyncAnthropic()
+        model = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
+        async with client.messages.stream(
+            model=model, max_tokens=2600, system=REFINEMENT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": msg}],
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
+    elif provider == "openai":
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI()
+        model = os.environ.get("LLM_MODEL", "gpt-5-mini")
+        kwargs = {"reasoning": {"effort": "low"}} if model.startswith("gpt-5") else {}
+        stream = await client.responses.create(
+            model=model, instructions=REFINEMENT_SYSTEM_PROMPT, input=msg, stream=True, **kwargs,
+        )
+        async for event in stream:
+            event_type = getattr(event, "type", "")
+            if event_type in ("response.failed", "response.incomplete"):
+                response = getattr(event, "response", None)
+                detail = getattr(response, "error", None) or getattr(response, "incomplete_details", None)
+                raise RuntimeError(f"OpenAI refinement {event_type}: {detail or 'provider did not complete the response.'}")
+            if event_type == "response.output_text.delta":
+                yield event.delta
+    else:
+        # The mock provider keeps the same venture identity/content shape while
+        # allowing API and persistence behavior to be exercised without a key.
+        text = json.dumps(
+            {key: venture.get(key) for key in (
+                "name", "tagline", "description", "category", "accent", "tiers",
+                "roadmap", "grounding", "image_prompts",
+            )},
+            ensure_ascii=False,
+        )
+        for i in range(0, len(text), 24):
+            yield text[i:i + 24]
+
+
 async def _stream_anthropic(msg: str) -> AsyncIterator[str]:
     import anthropic
 

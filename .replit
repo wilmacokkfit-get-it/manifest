@@ -1,6 +1,6 @@
 run = "python -m uvicorn server:app --host 0.0.0.0 --port 5000"
 entrypoint = "server.py"
-modules = ["python-3.11"]
+modules = ["python-3.11", "nodejs-24"]
 
 [nix]
 channel = "stable-24_05"

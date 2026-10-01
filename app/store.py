@@ -207,6 +207,201 @@ class SQLiteStore(RenderAccess):
             self._db.commit()
         return await self.get_by_id(venture_id)
 
+    async def claim_refinement(
+        self, venture_id: str, context: str | None = None, *, skipped: bool = False,
+        require_images_finished: bool = True, claim_id: str | None = None,
+    ) -> dict | None:
+        """Atomically consume the one refinement opportunity (or mark it skipped)."""
+        marker = {"state": "skipped"} if skipped else {
+            "state": "pending", "context": context, "claim_id": claim_id,
+        }
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute("SELECT * FROM ventures WHERE id = ?", [venture_id]).fetchone()
+            venture = self._row_to_dict(row)
+            eligible = bool(
+                venture
+                and venture.get("status") == "ready"
+                and venture.get("visibility") == "private"
+                and venture.get("path") is None
+                and "_refinement" not in (venture.get("grounding") or {})
+                and (not require_images_finished or venture.get("images_status") != "pending")
+            )
+            if not eligible:
+                self._db.rollback()
+                return None
+            grounding = dict(venture.get("grounding") or {})
+            grounding["_refinement"] = marker
+            claimed_status = "ready" if skipped else "refining"
+            self._db.execute(
+                """UPDATE ventures SET grounding = ?, status = ?, updated_at = ?
+                   WHERE id = ? AND status = 'ready' AND visibility = 'private' AND path IS NULL""",
+                [json.dumps(grounding), claimed_status, now_iso(), venture_id],
+            )
+            changed = self._db.execute("SELECT changes()").fetchone()[0]
+            self._db.commit()
+        return await self.get_by_id(venture_id) if changed else None
+
+    async def finish_refinement(
+        self, venture_id: str, fields: dict, claim_id: str | None = None,
+    ) -> dict | None:
+        fields = dict(fields)
+        fields["updated_at"] = now_iso()
+        enc = self._encode(fields)
+        sets = ", ".join(f"{k} = ?" for k in enc)
+        claim_condition = " AND json_extract(grounding, '$._refinement.claim_id') = ?" if claim_id else ""
+        values = [*enc.values(), venture_id]
+        if claim_id:
+            values.append(claim_id)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            cur = self._db.execute(
+                f"""UPDATE ventures SET {sets}
+                    WHERE id = ? AND status = 'refining' AND visibility = 'private' AND path IS NULL
+                    {claim_condition}""",
+                values,
+            )
+            if cur.rowcount:
+                self._db.commit()
+            else:
+                self._db.rollback()
+        return await self.get_by_id(venture_id) if cur.rowcount else None
+
+    async def clear_refinement_claim(
+        self, venture_id: str, original_grounding: dict, claim_id: str | None = None,
+    ) -> None:
+        """Restore the untouched original grounding after a failed provider call."""
+        claim_condition = " AND json_extract(grounding, '$._refinement.claim_id') = ?" if claim_id else ""
+        values = [json.dumps(original_grounding or {}), now_iso(), venture_id]
+        if claim_id:
+            values.append(claim_id)
+        with self._lock:
+            self._db.execute(
+                f"""UPDATE ventures SET grounding = ?, status = 'ready', updated_at = ?
+                   WHERE id = ? AND status = 'refining' {claim_condition}""",
+                values,
+            )
+            self._db.commit()
+
+    async def claim_path(self, venture_id: str, claim_id: str | None = None) -> dict | None:
+        """Reserve path generation so refinement cannot claim the same ready venture."""
+        claim_id = claim_id or _new_id()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute("SELECT * FROM ventures WHERE id = ?", [venture_id]).fetchone()
+            venture = self._row_to_dict(row)
+            if not venture or venture.get("status") != "ready":
+                self._db.rollback()
+                return None
+            grounding = dict(venture.get("grounding") or {})
+            marker = grounding.get("_refinement")
+            marker = dict(marker) if isinstance(marker, dict) else {"state": "skipped"}
+            marker["path_claim_id"] = claim_id
+            grounding["_refinement"] = marker
+            cur = self._db.execute(
+                """UPDATE ventures SET status = 'planning', grounding = ?, updated_at = ?
+                   WHERE id = ? AND status = 'ready'""",
+                [json.dumps(grounding), now_iso(), venture_id],
+            )
+            if cur.rowcount:
+                self._db.commit()
+            else:
+                self._db.rollback()
+        return await self.get_by_id(venture_id) if cur.rowcount else None
+
+    async def finish_path(self, venture_id: str, path: dict, claim_id: str | None = None) -> dict | None:
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute("SELECT * FROM ventures WHERE id = ?", [venture_id]).fetchone()
+            venture = self._row_to_dict(row)
+            marker = ((venture or {}).get("grounding") or {}).get("_refinement") or {}
+            if not venture or not claim_id or marker.get("path_claim_id") != claim_id:
+                self._db.rollback()
+                return None
+            grounding = dict(venture.get("grounding") or {})
+            marker = dict(grounding.get("_refinement") or {})
+            marker.pop("path_claim_id", None)
+            grounding["_refinement"] = marker
+            cur = self._db.execute(
+                """UPDATE ventures SET path = ?, status = 'ready', grounding = ?, updated_at = ?
+                   WHERE id = ? AND status = 'planning'
+                     AND json_extract(grounding, '$._refinement.path_claim_id') = ?""",
+                [json.dumps(path), json.dumps(grounding), now_iso(), venture_id, claim_id],
+            )
+            if cur.rowcount:
+                self._db.commit()
+            else:
+                self._db.rollback()
+        return await self.get_by_id(venture_id) if cur.rowcount else None
+
+    async def release_path_claim(self, venture_id: str, claim_id: str | None = None) -> None:
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute("SELECT * FROM ventures WHERE id = ?", [venture_id]).fetchone()
+            venture = self._row_to_dict(row)
+            marker = ((venture or {}).get("grounding") or {}).get("_refinement") or {}
+            if (
+                not venture or not claim_id or venture.get("status") != "planning"
+                or marker.get("path_claim_id") != claim_id
+            ):
+                self._db.rollback()
+                return
+            grounding = dict(venture.get("grounding") or {})
+            marker = dict(grounding.get("_refinement") or {})
+            marker.pop("path_claim_id", None)
+            grounding["_refinement"] = marker
+            self._db.execute(
+                """UPDATE ventures SET status = 'ready', grounding = ?, updated_at = ?
+                   WHERE id = ? AND status = 'planning'
+                     AND json_extract(grounding, '$._refinement.path_claim_id') = ?""",
+                [json.dumps(grounding), now_iso(), venture_id, claim_id],
+            )
+            self._db.commit()
+
+    async def reset_path(self, venture_id: str) -> dict | None:
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute("SELECT * FROM ventures WHERE id = ?", [venture_id]).fetchone()
+            venture = self._row_to_dict(row)
+            if not venture:
+                self._db.rollback()
+                return None
+            grounding = dict(venture.get("grounding") or {})
+            if venture.get("path") is not None and "_refinement" not in grounding:
+                grounding["_refinement"] = {"state": "skipped"}
+            self._db.execute(
+                "UPDATE ventures SET path = NULL, grounding = ?, updated_at = ? WHERE id = ?",
+                [json.dumps(grounding), now_iso(), venture_id],
+            )
+            self._db.commit()
+        return await self.get_by_id(venture_id)
+
+    async def release_venture(self, venture_id: str, released_at: str) -> dict | None:
+        """Release only if a refinement has not atomically claimed the venture."""
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute("SELECT * FROM ventures WHERE id = ?", [venture_id]).fetchone()
+            venture = self._row_to_dict(row)
+            if not venture or venture.get("status") == "refining":
+                self._db.rollback()
+                return None
+            grounding = dict(venture.get("grounding") or {})
+            if "_refinement" not in grounding:
+                grounding["_refinement"] = {"state": "skipped"}
+            cur = self._db.execute(
+                """UPDATE ventures SET visibility = 'public', released_at = ?, grounding = ?, updated_at = ?
+                   WHERE id = ? AND visibility = ? AND status != 'refining'""",
+                [
+                    released_at if venture.get("visibility") != "public" else venture.get("released_at"),
+                    json.dumps(grounding), now_iso(), venture_id, venture.get("visibility"),
+                ],
+            )
+            if cur.rowcount:
+                self._db.commit()
+            else:
+                self._db.rollback()
+        return await self.get_by_id(venture_id) if cur.rowcount else None
+
     async def get_by_id(self, venture_id: str) -> dict | None:
         with self._lock:
             row = self._db.execute("SELECT * FROM ventures WHERE id = ?", [venture_id]).fetchone()
@@ -441,6 +636,208 @@ class SupabaseStore(RenderAccess):
         fields["updated_at"] = now_iso()
         data = await self._rest("PATCH", "ventures", params={"id": f"eq.{venture_id}"}, json_body=fields,
                                 prefer="return=representation")
+        return data[0] if data else None
+
+    async def claim_refinement(
+        self, venture_id: str, context: str | None = None, *, skipped: bool = False,
+        require_images_finished: bool = True, claim_id: str | None = None,
+    ) -> dict | None:
+        current = await self.get_by_id(venture_id)
+        if not current:
+            return None
+        grounding = dict(current.get("grounding") or {})
+        grounding["_refinement"] = (
+            {"state": "skipped"} if skipped else {
+                "state": "pending", "context": context, "claim_id": claim_id,
+            }
+        )
+        params = {
+            "id": f"eq.{venture_id}",
+            "status": "eq.ready",
+            "visibility": "eq.private",
+            "path": "is.null",
+            "grounding->_refinement": "is.null",
+        }
+        if require_images_finished:
+            params["images_status"] = "neq.pending"
+        data = await self._rest(
+            "PATCH", "ventures", params=params,
+            json_body={
+                "grounding": grounding, "status": "ready" if skipped else "refining",
+                "updated_at": now_iso(),
+            },
+            prefer="return=representation",
+        )
+        return data[0] if data else None
+
+    async def finish_refinement(
+        self, venture_id: str, fields: dict, claim_id: str | None = None,
+    ) -> dict | None:
+        fields = dict(fields)
+        fields["updated_at"] = now_iso()
+        params = {
+            "id": f"eq.{venture_id}", "status": "eq.refining", "visibility": "eq.private",
+            "path": "is.null",
+        }
+        if claim_id:
+            params["grounding->_refinement->>claim_id"] = f"eq.{claim_id}"
+        data = await self._rest(
+            "PATCH", "ventures",
+            params=params,
+            json_body=fields, prefer="return=representation",
+        )
+        return data[0] if data else None
+
+    async def clear_refinement_claim(
+        self, venture_id: str, original_grounding: dict, claim_id: str | None = None,
+    ) -> None:
+        params = {"id": f"eq.{venture_id}", "status": "eq.refining"}
+        if claim_id:
+            params["grounding->_refinement->>claim_id"] = f"eq.{claim_id}"
+        await self._rest(
+            "PATCH", "ventures", params=params,
+            json_body={"grounding": original_grounding or {}, "status": "ready", "updated_at": now_iso()},
+            prefer="return=minimal",
+        )
+
+    async def claim_path(self, venture_id: str, claim_id: str | None = None) -> dict | None:
+        claim_id = claim_id or _new_id()
+        current = await self.get_by_id(venture_id)
+        if not current:
+            return None
+        grounding = dict(current.get("grounding") or {})
+        marker = grounding.get("_refinement")
+        marker = dict(marker) if isinstance(marker, dict) else {"state": "skipped"}
+        marker["path_claim_id"] = claim_id
+        grounding["_refinement"] = marker
+        params = {"id": f"eq.{venture_id}", "status": "eq.ready"}
+        fields = {"status": "planning", "grounding": grounding, "updated_at": now_iso()}
+        if current.get("grounding") is None or "_refinement" not in current.get("grounding", {}):
+            params["grounding->_refinement"] = "is.null"
+        data = await self._rest("PATCH", "ventures", params=params, json_body=fields, prefer="return=representation")
+        if not data and params.get("grounding->_refinement") == "is.null":
+            current = await self.get_by_id(venture_id)
+            if current and current.get("status") == "ready":
+                grounding = dict(current.get("grounding") or {})
+                marker = grounding.get("_refinement")
+                marker = dict(marker) if isinstance(marker, dict) else {"state": "skipped"}
+                marker["path_claim_id"] = claim_id
+                grounding["_refinement"] = marker
+                data = await self._rest(
+                    "PATCH", "ventures", params={"id": f"eq.{venture_id}", "status": "eq.ready"},
+                    json_body={"status": "planning", "grounding": grounding, "updated_at": now_iso()},
+                    prefer="return=representation",
+                )
+        return data[0] if data else None
+
+    async def finish_path(
+        self, venture_id: str, path: dict, claim_id: str | None = None,
+    ) -> dict | None:
+        if not claim_id:
+            return None
+        current = await self.get_by_id(venture_id)
+        if not current:
+            return None
+        grounding = dict(current.get("grounding") or {})
+        marker = grounding.get("_refinement")
+        if not isinstance(marker, dict) or marker.get("path_claim_id") != claim_id:
+            return None
+        marker.pop("path_claim_id", None)
+        grounding["_refinement"] = marker
+        data = await self._rest(
+            "PATCH", "ventures",
+            params={
+                "id": f"eq.{venture_id}", "status": "eq.planning",
+                "grounding->_refinement->>path_claim_id": f"eq.{claim_id}",
+            },
+            json_body={
+                "path": path, "status": "ready", "grounding": grounding, "updated_at": now_iso(),
+            },
+            prefer="return=representation",
+        )
+        return data[0] if data else None
+
+    async def release_path_claim(self, venture_id: str, claim_id: str | None = None) -> None:
+        if not claim_id:
+            return
+        current = await self.get_by_id(venture_id)
+        if not current:
+            return
+        grounding = dict(current.get("grounding") or {})
+        marker = grounding.get("_refinement")
+        if not isinstance(marker, dict) or marker.get("path_claim_id") != claim_id:
+            return
+        marker.pop("path_claim_id", None)
+        grounding["_refinement"] = marker
+        await self._rest(
+            "PATCH", "ventures",
+            params={
+                "id": f"eq.{venture_id}", "status": "eq.planning",
+                "grounding->_refinement->>path_claim_id": f"eq.{claim_id}",
+            },
+            json_body={"status": "ready", "grounding": grounding, "updated_at": now_iso()},
+            prefer="return=minimal",
+        )
+
+    async def reset_path(self, venture_id: str) -> dict | None:
+        current = await self.get_by_id(venture_id)
+        if not current:
+            return None
+        grounding = dict(current.get("grounding") or {})
+        params = {"id": f"eq.{venture_id}"}
+        fields = {"path": None, "updated_at": now_iso()}
+        if current.get("path") is not None and "_refinement" not in grounding:
+            grounding["_refinement"] = {"state": "skipped"}
+            params["grounding->_refinement"] = "is.null"
+            fields["grounding"] = grounding
+        data = await self._rest(
+            "PATCH", "ventures", params=params, json_body=fields, prefer="return=representation",
+        )
+        if not data and params.get("grounding->_refinement") == "is.null":
+            # A concurrent refinement claim can only win when the path was null;
+            # in that case its marker remains untouched by this path reset.
+            data = await self._rest(
+                "PATCH", "ventures", params={"id": f"eq.{venture_id}"},
+                json_body={"path": None, "updated_at": now_iso()}, prefer="return=representation",
+            )
+        return data[0] if data else None
+
+    async def release_venture(self, venture_id: str, released_at: str) -> dict | None:
+        current = await self.get_by_id(venture_id)
+        if not current:
+            return None
+        params = {
+            "id": f"eq.{venture_id}", "visibility": f"eq.{current.get('visibility')}",
+            "status": "neq.refining",
+        }
+        fields = {
+            "visibility": "public", "released_at": (
+                released_at if current.get("visibility") != "public" else current.get("released_at")
+            ), "updated_at": now_iso(),
+        }
+        grounding = dict(current.get("grounding") or {})
+        if "_refinement" not in grounding:
+            grounding["_refinement"] = {"state": "skipped"}
+            params["grounding->_refinement"] = "is.null"
+            fields["grounding"] = grounding
+        data = await self._rest(
+            "PATCH", "ventures", params=params, json_body=fields,
+            prefer="return=representation",
+        )
+        if not data and params.get("grounding->_refinement") == "is.null":
+            current = await self.get_by_id(venture_id)
+            if current and current.get("visibility") == "private":
+                grounding = dict(current.get("grounding") or {})
+                params = {
+                    "id": f"eq.{venture_id}", "visibility": "eq.private", "status": "neq.refining",
+                }
+                fields = {"visibility": "public", "released_at": released_at, "updated_at": now_iso()}
+                if not grounding.get("_refinement"):
+                    grounding["_refinement"] = {"state": "skipped"}
+                    params["grounding->_refinement"] = "is.null"
+                    fields["grounding"] = grounding
+                data = await self._rest("PATCH", "ventures", params=params, json_body=fields,
+                                        prefer="return=representation")
         return data[0] if data else None
 
     async def get_by_id(self, venture_id: str) -> dict | None:

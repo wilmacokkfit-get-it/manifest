@@ -33,3 +33,9 @@ Run the full `supabase/migration.sql` in Supabase's SQL Editor, including its fi
 ## Image privacy
 
 Render delivery checks venture visibility and the creator cookie on every request, including legacy local `/renders/` URLs. Supabase startup updates the configured bucket to private in place and verifies it before serving; failure stops startup. Run the migration to create the bucket on new installations. Existing images and stored references are retained; views translate legacy Supabase public URLs to protected app URLs. Do not grant browser roles read access to render objects. Previously downloaded images or old public CDN caches cannot be recalled by the app.
+
+## One optional refinement
+
+After the first venture is generated, its creator can add up to 1,000 characters of context and refine it once, or keep the first result. Refinement waits for the original renders to finish, preserves the venture's link and original provenance, and regenerates its content and renders. Failed generation leaves the first result intact and allows a retry. The limit and skip state persist in existing JSON storage; no schema migration is required. Starting a path or releasing a venture closes the unused refinement opportunity.
+
+`python tests/refinement_preview.py` serves isolated, disposable UI fixtures on localhost port 5001 for visual checks. It never uses workspace ventures or Supabase.

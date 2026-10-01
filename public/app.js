@@ -237,6 +237,8 @@
     const desc = h('p', { class: 'v-desc' });
     const cat = h('div', { class: 'v-cat' });
     const head = h('header', { class: 'v-head' }, prov, name, tagline, desc, cat);
+    const refinement = h('section', { class: 'refinement hidden', 'aria-label': 'One optional refinement' });
+    let refinementDraft = '', refinementState = null, refinementBusy = false;
 
     // renders
     const renderSlots = [];
@@ -284,7 +286,7 @@
     // actions
     const actions = h('div', { class: 'v-actions hidden' });
 
-    root.append(halo, head, renders, tiers, path, roadmap, grounding, seal, owner, signals, actions);
+    root.append(halo, head, refinement, renders, tiers, path, roadmap, grounding, seal, owner, signals, actions);
 
     let venture = null;   // full record once complete/loaded
     let pollTimer = null, pollStart = 0;
@@ -343,8 +345,22 @@
 
     // ---- full record (after done, or loaded from the API) ----
     function complete(v) {
+      const newlyRefined = venture && venture.refinement?.state !== 'completed' && v.refinement?.state === 'completed';
+      if (newlyRefined) {
+        stopPolling();
+        renderSlots.forEach(slot => {
+          slot.classList.remove('done');
+          const img = slot.querySelector('img');
+          img.classList.remove('on');
+          img.removeAttribute('src');
+        });
+        renderStatus.classList.remove('hidden');
+      }
       venture = v;
-      ensureSlots(v.render_count || (v.images || []).length || 2);
+      const slotCount = v.render_count || (v.images || []).length || 2;
+      while (renderSlots.length > slotCount) renderSlots.pop().remove();
+      ensureSlots(slotCount);
+      while (road.children.length > (v.roadmap || []).length) road.lastChild.remove();
       update({ ...v, image_prompts: true }, null);
       [tagline, desc, ...Object.values(gEls)].forEach(el => el.classList.remove('caret'));
       root.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
@@ -354,12 +370,105 @@
       sealHash.textContent = v.provenance.hash;
       show(seal);
       if (v.images_status === 'failed' && !(v.images || []).some(Boolean)) renders.classList.add('hidden');
-      else { show(renders); applyImages(v); if (v.images_status === 'pending') startPolling(); }
+      else { show(renders); applyImages(v); }
+      renderRefinement(v);
       renderOwner(v);
       renderSignals(v);
       renderActions(v);
       renderTierPicks(v);
       renderPath(v);
+      if (v.images_status === 'pending' || v.refinement?.state === 'pending') startPolling();
+      else stopPolling();
+    }
+
+    function renderRefinement(v) {
+      const state = v.is_owner ? v.refinement?.state : null;
+      const busy = refinementBusy || state === 'pending';
+      root.querySelectorAll('button').forEach(button => {
+        if (refinement.contains(button)) return;
+        if (busy && !button.hasAttribute('data-refinement-disabled')) {
+          button.setAttribute('data-refinement-disabled', String(button.disabled));
+          button.disabled = true;
+        } else if (!busy && button.hasAttribute('data-refinement-disabled')) {
+          button.disabled = button.getAttribute('data-refinement-disabled') === 'true';
+          button.removeAttribute('data-refinement-disabled');
+        }
+      });
+      root.classList.toggle('refining', busy);
+      root.setAttribute('aria-busy', String(busy));
+      if (!state || state === 'unavailable' || state === 'skipped') {
+        refinement.classList.add('hidden');
+        refinementState = state;
+        return;
+      }
+      show(refinement);
+      const displayState = `${state}:${busy}`;
+      if (refinementState === displayState) return;
+      refinementState = displayState;
+      refinement.replaceChildren();
+      if (state === 'completed') {
+        refinement.append(h('p', { class: 'refinement-done', text: 'Your context has been applied. This is your final result.' }));
+        return;
+      }
+      const label = h('label', { for: 'refinement-context', text: 'Anything the first result missed?' });
+      const help = h('p', { class: 'refinement-help', id: 'refinement-help', text: 'Add a little more context or a correction. You get one refinement, not an ongoing chat.' });
+      const input = h('textarea', {
+        id: 'refinement-context', name: 'context', rows: '3', maxlength: '1000',
+        placeholder: 'For example: this is for renters, and it needs to cost under $50.',
+        'aria-describedby': 'refinement-help refinement-status',
+        required: true,
+      });
+      input.value = refinementDraft || v.refinement?.context || '';
+      const note = h('p', { class: 'refinement-note', id: 'refinement-status', role: 'status', 'aria-live': 'polite' });
+      const submit = h('button', { class: 'btn primary', type: 'submit', text: busy ? 'Applying your context…' : 'Refine once →' });
+      const skip = h('button', { class: 'btn ghost', type: 'button', text: 'Keep this result' });
+      const waiting = state === 'waiting';
+      input.disabled = busy;
+      submit.disabled = busy || waiting;
+      skip.disabled = busy;
+      if (busy) note.textContent = 'Updating your venture. The first result stays safe until the refinement is ready.';
+      else if (waiting) note.textContent = 'You can write now. Refinement will be ready when the first renders finish.';
+      input.addEventListener('input', () => { refinementDraft = input.value; note.textContent = waiting ? 'Waiting for the first renders to finish…' : ''; });
+      const recover = async (error) => {
+        refinementBusy = false;
+        // The request may have completed even if its response was interrupted.
+        try { complete(await api(vpath(v, ''))); }
+        catch (_) { refinementState = null; renderRefinement(venture); }
+        const currentNote = refinement.querySelector('.refinement-note');
+        if (currentNote && venture.refinement?.state !== 'pending') {
+          currentNote.textContent = error.message + ' Your first result is still here.';
+        } else if (venture.refinement?.state !== 'pending') toast(error.message);
+      };
+      const form = h('form', { onsubmit: async (e) => {
+        e.preventDefault();
+        const context = input.value.trim();
+        if (!context || context.length > 1000) { note.textContent = 'Add between 1 and 1,000 characters.'; input.focus(); return; }
+        if (refinementBusy || waiting) return;
+        refinementDraft = context;
+        refinementBusy = true;
+        stopPolling();
+        renderRefinement(v);
+        try {
+          const fresh = await api(vpath(v, '/refine'), { method: 'POST', body: JSON.stringify({ context }) });
+          refinementBusy = false;
+          refinementDraft = '';
+          complete(fresh);
+          toast('Your one refinement is complete.');
+        } catch (error) { await recover(error); }
+      } }, label, help, input, h('div', { class: 'refinement-buttons' }, submit, skip), note);
+      skip.addEventListener('click', async () => {
+        if (refinementBusy) return;
+        refinementBusy = true;
+        renderRefinement(v);
+        try {
+          const fresh = await api(vpath(v, '/refinement/skip'), { method: 'POST' });
+          refinementBusy = false;
+          refinementDraft = '';
+          complete(fresh);
+          toast('First result kept.');
+        } catch (error) { await recover(error); }
+      });
+      refinement.append(form);
     }
 
     function applyImages(v) {
@@ -368,7 +477,7 @@
         const img = slot.querySelector('img');
         img.alt = `${v.name} render ${i + 1}`;
         img.onload = () => { img.classList.add('on'); slot.classList.add('done'); };
-        img.src = assetUrl(u);
+        img.src = assetUrl(u) + (v.refinement?.state === 'completed' ? (u.includes('?') ? '&' : '?') + 'refined=1' : '');
       });
       const allIn = (v.images || []).filter(Boolean).length >= renderSlots.length;
       if (v.images_status === 'ready' || allIn) renderStatus.classList.add('hidden');
@@ -385,12 +494,27 @@
       stopPolling(); pollStart = Date.now();
       let delay = 2500;
       const tick = async () => {
-        if (Date.now() - pollStart > 150000) { renderStatus.textContent = 'Renders are taking longer than usual. Refresh in a minute.'; return; }
+        if (Date.now() - pollStart > 150000) {
+          const note = refinement.querySelector('.refinement-note');
+          if (venture.refinement?.state === 'pending' && note) note.textContent = 'Refinement is taking longer than usual. Refresh to check its progress.';
+          else {
+            renderStatus.classList.remove('hidden');
+            renderStatus.textContent = 'Renders are taking longer than usual. Refresh in a minute.';
+          }
+          return;
+        }
         try {
           const fresh = await api(`/api/ventures/${encodeURIComponent(venture.slug)}`);
+          const enteredCompleted = venture.refinement?.state !== 'completed' && fresh.refinement?.state === 'completed';
+          if (enteredCompleted || (venture.refinement?.state === 'pending' && fresh.refinement?.state !== 'pending')) {
+            refinementState = null;
+            complete(fresh);
+            return;
+          }
           venture = { ...venture, ...fresh };
           applyImages(fresh);
-          if (fresh.images_status === 'pending') { delay = Math.min(delay * 1.25, 8000); pollTimer = setTimeout(tick, delay); }
+          renderRefinement(fresh);
+          if (fresh.images_status === 'pending' || fresh.refinement?.state === 'pending') { delay = Math.min(delay * 1.25, 8000); pollTimer = setTimeout(tick, delay); }
         } catch (_) { pollTimer = setTimeout(tick, 6000); }
       };
       pollTimer = setTimeout(tick, delay);
@@ -411,7 +535,7 @@
         const chosen = !!(v.path && v.path.tier === i);
         r.classList.toggle('chosen', chosen);
         if (chosen) r.append(h('span', { class: 'chosen-tag', text: v.is_owner ? 'Your path' : 'The path they chose' }));
-        else if (v.is_owner && !v.path && !pathStreaming) r.append(h('button', { class: 'btn small pick', text: 'Walk this path →', onclick: () => choosePath(v, i) }));
+        else if (v.is_owner && !v.path && !pathStreaming) r.append(h('button', { class: 'btn small pick', text: 'Walk this path →', disabled: v.refinement?.state === 'pending', onclick: () => choosePath(v, i) }));
       });
       if (v.is_owner && !v.path && !pathStreaming) tiers.after(h('p', { class: 'pick-hint', text: 'Three ways to build it. Pick one and the engine walks you through it step by step, with suppliers to call, notes, and a place to ask the Floor for help. You can reset and pick again.' }));
     }
@@ -610,6 +734,7 @@
             complete(updated);
           } catch (e) { btn.disabled = false; btn.textContent = 'Release it →'; toast(e.message); }
         } });
+        btn.disabled = v.refinement?.state === 'pending';
         owner.append(
           h('h3', { text: 'This venture is private.' }),
           h('p', { text: 'Only you can see this page. Releasing it makes it public, lets people signal what they’d do with it, and starts its climb toward the Mark. The record already proves it was yours first.' }),

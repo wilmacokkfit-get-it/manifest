@@ -162,6 +162,18 @@ footer a{color:var(--fg-50)}
 .owner h3{font-family:var(--serif);font-weight:500;font-size:22px;margin:0 0 10px}
 .owner p{color:var(--fg-50);font-size:13.5px;line-height:1.7;margin:0 auto 26px;max-width:440px}
 .owner .row{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.refinement{max-width:640px;margin:42px auto 0;padding:28px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.025)}
+.refinement label{display:block;font-family:var(--serif);font-size:24px;margin-bottom:10px}
+.refinement-help{color:var(--fg-50);font-size:13px;line-height:1.7;margin:0 0 18px}
+.refinement textarea{display:block;width:100%;min-height:100px;padding:14px;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:12px;resize:vertical;font:inherit;font-size:14px;line-height:1.6;color:var(--fg)}
+.refinement textarea:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.refinement textarea::placeholder{color:var(--fg-30)}
+.refinement-buttons{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+.refinement-note{color:var(--fg-50);font-size:12px;line-height:1.6;margin:14px 0 0}
+.refinement-note:empty{display:none}
+.refinement-done{color:var(--fg-50);font-size:13px;line-height:1.7;margin:0;text-align:center}
+.refining .owner button,.refining .pick,.refining .v-actions button{pointer-events:none;opacity:.45}
+@media(max-width:600px){.refinement{padding:22px 18px;margin-top:30px}.refinement-buttons .btn{flex:1 1 100%}}
 
 .signals{max-width:760px;margin:110px auto 0;text-align:center}
 .sig-title{font-family:var(--serif);font-weight:500;font-size:clamp(24px,3vw,32px);margin:0 0 10px}

@@ -16,6 +16,7 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -160,6 +161,30 @@ def _record_hit(caller: str) -> None:
     _hits[caller].append(time.time())
 
 
+async def _shielded_bounded_call(awaitable, timeout: float = 35):
+    """Finish short store operations despite request cancellation, with a hard bound."""
+    task = asyncio.create_task(awaitable)
+    try:
+        with anyio.move_on_after(timeout, shield=True) as timeout_scope:
+            result = await asyncio.shield(task)
+        if timeout_scope.cancel_called:
+            task.cancel()
+            with anyio.move_on_after(timeout, shield=True):
+                try:
+                    await asyncio.shield(task)
+                except BaseException:
+                    pass
+            raise TimeoutError("Shielded store operation timed out.")
+        return result
+    except asyncio.CancelledError:
+        with anyio.move_on_after(timeout, shield=True):
+            try:
+                await asyncio.shield(task)
+            except BaseException:
+                pass
+        raise
+
+
 # __Host- prefix: required by the pplx.app proxy (it drops other cookie names) and a good idea anywhere.
 COOKIE = "__Host-manifest_owner"
 
@@ -201,6 +226,32 @@ def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: 
         "buy": v.get("buy_count", 0), "build": v.get("build_count", 0), "fund": v.get("fund_count", 0),
         "total": v.get("signal_count", 0), "avg_price": None,
     }
+    grounding = dict(v.get("grounding") or {})
+    has_refinement_marker = "_refinement" in grounding
+    marker = grounding.pop("_refinement", None)
+    refinement = None
+    if is_owner:
+        marker = marker if isinstance(marker, dict) else {}
+        state = marker.get("state")
+        if state in ("completed", "skipped"):
+            refinement = {"state": state}
+            if marker.get("context") is not None:
+                refinement["context"] = marker["context"]
+        elif state == "pending" or v.get("status") == "refining":
+            refinement = {"state": "pending"}
+            if marker.get("context") is not None:
+                refinement["context"] = marker["context"]
+        elif (
+            v.get("status") == "ready"
+            and v.get("visibility") == "private"
+            and v.get("path") is None
+            and not has_refinement_marker
+        ):
+            refinement = {
+                "state": "waiting" if v.get("images_status") == "pending" else "available"
+            }
+        else:
+            refinement = {"state": "unavailable"}
     return {
         "id": v["id"],
         "slug": v["slug"],
@@ -211,7 +262,7 @@ def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: 
         "accent": v.get("accent") or "#e8eeff",
         "tiers": v.get("tiers") or [],
         "roadmap": v.get("roadmap") or [],
-        "grounding": v.get("grounding") or {},
+        "grounding": grounding,
         "images": _image_urls(v),
         "render_count": len(v.get("image_prompts") or []),
         "images_status": v.get("images_status", "pending"),
@@ -230,6 +281,7 @@ def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: 
         "is_owner": is_owner,
         "idea": v.get("idea_raw") if is_owner else None,
         "path": _path_view(v.get("path"), is_owner),
+        "refinement": refinement,
         "needs": needs or [],
     }
 
@@ -299,6 +351,45 @@ def _normalize(data: dict) -> dict:
         },
         "image_prompts": prompts,
     }
+
+
+def _complete_refinement(buf: str) -> dict:
+    """Reject incomplete or structurally hollow provider replies before saving."""
+    try:
+        data = json.loads(buf)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("The engine returned incomplete JSON.") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("name"), str) or not data["name"].strip():
+        raise RuntimeError("The engine returned no usable venture name.")
+    if not isinstance(data.get("description"), str) or len(data["description"].strip()) < 20:
+        raise RuntimeError("The engine returned no usable venture description.")
+    tiers = data.get("tiers")
+    if not isinstance(tiers, list) or not any(
+        isinstance(tier, dict) and str(tier.get("title") or "").strip()
+        and str(tier.get("description") or "").strip()
+        for tier in tiers
+    ):
+        raise RuntimeError("The engine returned no usable venture tiers.")
+    roadmap = data.get("roadmap")
+    if not isinstance(roadmap, list) or not any(
+        isinstance(step, dict) and str(step.get("action") or "").strip()
+        and str(step.get("where") or "").strip()
+        for step in roadmap
+    ):
+        raise RuntimeError("The engine returned no usable venture roadmap.")
+    grounding = data.get("grounding")
+    grounding_fields = ("exists", "who_pays", "first_hundred")
+    if not isinstance(grounding, dict) or any(
+        not isinstance(grounding.get(key), str) or not grounding[key].strip()
+        for key in grounding_fields
+    ):
+        raise RuntimeError("The engine returned no usable venture grounding.")
+    prompts = data.get("image_prompts")
+    if not isinstance(prompts, list) or not any(
+        isinstance(prompt, str) and prompt.strip() for prompt in prompts
+    ):
+        raise RuntimeError("The engine returned no usable image prompts.")
+    return data
 
 
 def _sse(event: str, data) -> str:
@@ -385,6 +476,43 @@ async def _render_images(v: dict) -> None:
     await store.update_venture(v["id"], {"images": urls, "images_status": status})
 
 
+def _owns_completed_refinement(v: dict | None, claim_id: str) -> bool:
+    marker = ((v or {}).get("grounding") or {}).get("_refinement") or {}
+    return marker.get("state") == "completed" and marker.get("claim_id") == claim_id
+
+
+async def _commit_refinement_and_schedule(v: dict, fields: dict, claim_id: str) -> dict:
+    """Commit refinement and schedule renders even if the commit response is lost."""
+    saved = None
+    finish_error: BaseException | None = None
+    try:
+        saved = await store.finish_refinement(v["id"], fields, claim_id=claim_id)
+    except asyncio.CancelledError as exc:
+        finish_error = exc
+    except Exception as exc:  # noqa: BLE001
+        finish_error = exc
+
+    if not _owns_completed_refinement(saved, claim_id):
+        try:
+            persisted = await store.get_by_id(v["id"])
+        except Exception:
+            if finish_error:
+                raise finish_error
+            raise
+        if _owns_completed_refinement(persisted, claim_id):
+            saved = persisted
+        elif finish_error:
+            raise finish_error
+        else:
+            raise RuntimeError("The refinement claim could not be completed.")
+
+    # No await between the durable completion check and task creation. This runs
+    # inside a shielded bounded task so a disconnect cannot strand pending renders.
+    if saved.get("images_status") == "pending":
+        asyncio.create_task(_render_images(saved))
+    return saved
+
+
 # ---------------------------------------------------------------------------
 # Ventures
 # ---------------------------------------------------------------------------
@@ -454,6 +582,98 @@ async def get_venture(slug: str, request: Request):
     return await _full_view(v, is_owner)
 
 
+class RefinementBody(BaseModel):
+    context: str
+
+
+@app.post("/api/ventures/{slug}/refine")
+async def refine_venture(slug: str, body: RefinementBody, request: Request):
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can refine this venture.")
+    context = body.context.strip()
+    if not context or len(context) > 1000:
+        raise HTTPException(400, "Context must be between 1 and 1000 characters.")
+    caller = _caller_id(request)
+    _check_rate(caller)
+    original_grounding = dict(v.get("grounding") or {})
+    claim_id = new_token()
+    completed = False
+    try:
+        # The store may commit its conditional PATCH just before a request is
+        # cancelled or the network drops its response. Keep acquisition shielded,
+        # then always attempt a token-scoped cleanup in the finally block.
+        claimed = await _shielded_bounded_call(
+            store.claim_refinement(v["id"], context, require_images_finished=True, claim_id=claim_id)
+        )
+        if not claimed:
+            raise HTTPException(409, "This venture is not available for refinement.")
+        _record_hit(caller)
+
+        buf = ""
+        with anyio.fail_after(120):
+            async for chunk in llm.stream_refinement_text(v, context):
+                buf += chunk
+        obj = _complete_refinement(buf)
+        data = _normalize(obj)
+        marker = {"state": "completed", "context": context, "claim_id": claim_id}
+        grounding = dict(data["grounding"])
+        grounding["_refinement"] = marker
+        images_status = (
+            "pending"
+            if llm.image_provider() != "none" and data["image_prompts"]
+            else "failed"
+        )
+        saved = await _shielded_bounded_call(
+            _commit_refinement_and_schedule(
+                v,
+                {
+                    **{k: data[k] for k in (
+                        "name", "tagline", "description", "category", "accent", "tiers",
+                        "roadmap", "image_prompts",
+                    )},
+                    "grounding": grounding,
+                    "images": [],
+                    "images_status": images_status,
+                    "status": "ready",
+                },
+                claim_id,
+            ),
+            timeout=65,
+        )
+        completed = True
+        return await _full_view(saved, True)
+    except asyncio.CancelledError:
+        raise
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Refinement failed: {str(exc)[:200]}") from exc
+    finally:
+        if not completed:
+            try:
+                await _shielded_bounded_call(
+                    store.clear_refinement_claim(v["id"], original_grounding, claim_id)
+                )
+            except Exception as cleanup_error:  # noqa: BLE001
+                print(f"[refine] {slug} claim cleanup failed: {cleanup_error}")
+
+
+@app.post("/api/ventures/{slug}/refinement/skip")
+async def skip_refinement(slug: str, request: Request):
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can skip refinement.")
+    saved = await store.claim_refinement(v["id"], skipped=True, require_images_finished=False)
+    if not saved:
+        fresh = await store.get_by_id(v["id"])
+        marker = ((fresh or {}).get("grounding") or {}).get("_refinement", {})
+        if marker.get("state") == "skipped":
+            return await _full_view(fresh, True)
+        raise HTTPException(409, "This venture is not available to skip refinement.")
+    return await _full_view(saved, True)
+
+
 # ---------------------------------------------------------------------------
 # The Path: pick a tier, get walked through it, ask the Floor for help
 # ---------------------------------------------------------------------------
@@ -496,11 +716,24 @@ async def choose_path(slug: str, body: PathBody, request: Request):
     existing = v.get("path") or {}
     if existing.get("steps") and any(st.get("status") != "todo" for st in existing["steps"]):
         raise HTTPException(409, "You've already started walking a path. Finish it or reset it first.")
+    claim_id = new_token()
+    try:
+        claimed = await _shielded_bounded_call(store.claim_path(v["id"], claim_id))
+    except BaseException:
+        try:
+            await _shielded_bounded_call(store.release_path_claim(v["id"], claim_id))
+        except Exception as cleanup_error:  # noqa: BLE001
+            print(f"[path] {slug} claim cleanup failed: {cleanup_error}")
+        raise
+    if not claimed:
+        raise HTTPException(409, "This venture is already being refined or planned.")
+    v = claimed
     tier_label = (v.get("tiers") or [{}] * 3)[tier].get("label") or f"Path {tier + 1}"
 
     async def gen():
         buf = ""
         last_emit, last_key = 0.0, None
+        finished = False
         try:
             async for chunk in llm.stream_path_text(v, tier):
                 buf += chunk
@@ -513,11 +746,22 @@ async def choose_path(slug: str, body: PathBody, request: Request):
             if not obj or not obj.get("steps"):
                 raise RuntimeError("The engine returned nothing usable.")
             path = _normalize_path(obj, tier, tier_label)
-            saved = await store.update_venture(v["id"], {"path": path})
+            saved = await store.finish_path(v["id"], path, claim_id)
+            if not saved:
+                raise RuntimeError("The path claim could not be completed.")
+            finished = True
             yield _sse("done", await _full_view(saved, True))
+        except asyncio.CancelledError:
+            raise
         except Exception as e:  # noqa: BLE001
             print(f"[path] {slug} failed: {e}")
             yield _sse("error", {"message": str(e)[:300] or "The engine stalled."})
+        finally:
+            if not finished:
+                try:
+                    await _shielded_bounded_call(store.release_path_claim(v["id"], claim_id))
+                except Exception as cleanup_error:  # noqa: BLE001
+                    print(f"[path] {slug} claim cleanup failed: {cleanup_error}")
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -554,7 +798,7 @@ async def reset_path(slug: str, request: Request):
     v, is_owner = await _load(slug, request)
     if not is_owner:
         raise HTTPException(403, "Only the creator can reset the path.")
-    saved = await store.update_venture(v["id"], {"path": None})
+    saved = await store.reset_path(v["id"])
     return await _full_view(saved, True)
 
 
@@ -625,8 +869,15 @@ async def release(slug: str, request: Request):
     v, is_owner = await _load(slug, request)
     if not is_owner:
         raise HTTPException(403, "Only the creator can release a venture.")
-    if v.get("visibility") != "public":
-        v = await store.update_venture(v["id"], {"visibility": "public", "released_at": now_iso()})
+    released = await store.release_venture(v["id"], now_iso())
+    if not released:
+        fresh = await store.get_by_id(v["id"])
+        if fresh and fresh.get("visibility") == "public":
+            v = fresh
+        else:
+            raise HTTPException(409, "A venture cannot be released while it is being refined.")
+    else:
+        v = released
     return await _full_view(v, True)
 
 
