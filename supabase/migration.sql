@@ -64,6 +64,10 @@ alter table public.waitlist enable row level security;
 
 -- All renders use owner-checked app delivery, including released ventures.
 -- Update only bucket visibility: existing objects and venture records stay intact.
+-- A private bucket does not override permissive SELECT policies on
+-- storage.objects. Do not grant anon/authenticated browser reads to renders.
+-- Audit existing project policies separately; do not delete shared policies here.
+-- See docs/supabase-image-privacy.md for a disposable live check and CDN caveats.
 insert into storage.buckets (id, name, public)
 values ('renders', 'renders', false)
 on conflict (id) do update set public = false;

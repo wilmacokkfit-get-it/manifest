@@ -148,6 +148,10 @@ If you skip this and use `STORE=supabase`, choosing a path will fail with a colu
 
 ## Local run (Mac or Windows)
 
+For the opt-in, disposable live Supabase image-privacy check, see
+[the integration check guide](docs/supabase-image-privacy.md). Ordinary tests
+do not contact real Supabase Storage.
+
 ```
 pip install -r requirements.txt
 cp .env.example .env      # fill in your keys
