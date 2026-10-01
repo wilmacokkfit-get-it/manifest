@@ -1,14 +1,47 @@
-run = "uvicorn server:app --host 0.0.0.0 --port 8000"
+run = "python -m uvicorn server:app --host 0.0.0.0 --port 5000"
 entrypoint = "server.py"
 modules = ["python-3.11"]
 
 [nix]
 channel = "stable-24_05"
+packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "tcl", "tk", "zlib"]
 
 [deployment]
 run = ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port 8000"]
 deploymentTarget = "cloudrun"
 
 [[ports]]
-localPort = 8000
+localPort = 5000
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+IMAGE_MODEL = "gpt-image-1"
+IMAGE_PROVIDER = "openai"
+LLM_MODEL = "gpt-5-mini"
+LLM_PROVIDER = "openai"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python -m uvicorn server:app --host 0.0.0.0 --port 5000"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"

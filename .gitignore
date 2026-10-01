@@ -3,3 +3,5 @@ data.sandbox/
 .env
 __pycache__/
 *.pyc
+.pythonlibs/
+.pytest_cache/
