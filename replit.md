@@ -12,7 +12,7 @@ This imported project keeps its original FastAPI backend, vanilla HTML/CSS/JS fr
 
 Real text and image generation require `OPENAI_API_KEY` in Replit Secrets. The shared settings use `LLM_PROVIDER=openai`, `LLM_MODEL=gpt-5-mini`, `IMAGE_PROVIDER=openai`, and `IMAGE_MODEL=gpt-image-1`. Generation uses the connected OpenAI account's credits. Never put keys in source files or chat.
 
-Until the key is supplied, the page and non-AI routes can run, but generation cannot be verified. Explicitly selecting OpenAI avoids the imported app's automatic canned mock response when no credentials exist.
+The OpenAI key has been supplied securely. Real streaming venture generation, private-owner access, SQLite saving, and both product image renders were verified. Explicitly selecting OpenAI avoids the imported app's automatic canned mock response if credentials are removed later.
 
 ## Publishing later
 
