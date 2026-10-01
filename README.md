@@ -152,6 +152,18 @@ For the opt-in, disposable live Supabase image-privacy check, see
 [the integration check guide](docs/supabase-image-privacy.md). Ordinary tests
 do not contact real Supabase Storage.
 
+Run regression tests with `python -m unittest discover -s tests -v`.
+The storage-policy audit tests require PostgreSQL server/client tools (`initdb`,
+`pg_ctl`, and `psql`) on PATH; Replit's system dependencies include PostgreSQL.
+They create a fresh cluster under `/tmp`, use a private Unix socket with TCP
+disabled, ignore inherited connection settings and credentials, and stop and
+remove the cluster afterward. Missing tools fail explicitly rather than skipping
+these checks. No existing local database or Supabase project is accessed.
+Run just those tests with
+`python -m unittest discover -s tests -p 'test_storage_policy_audit*.py' -v`.
+The audit reports metadata for operator review; these checks do not certify
+arbitrary policy expressions as safe.
+
 ```
 pip install -r requirements.txt
 cp .env.example .env      # fill in your keys
