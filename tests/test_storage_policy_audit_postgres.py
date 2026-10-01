@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.render_storage_policy_audit import audit_sql
 
@@ -28,11 +29,12 @@ class StoragePolicyAuditPostgresTests(unittest.TestCase):
                 )
             cls.tools[name] = binary
 
-        cls.temp = tempfile.TemporaryDirectory(prefix="audit-pg-", dir="/tmp")
-        cls.addClassCleanup(cls.temp.cleanup)
-        cls.root = Path(cls.temp.name)
+        # No TemporaryDirectory finalizer: it must never delete a live cluster
+        # after a failed shutdown, including when this class is garbage-collected.
+        cls.root = Path(tempfile.mkdtemp(prefix="audit-pg-", dir="/tmp"))
         cls.data = cls.root / "data"
         cls.socket = cls.root / "socket"
+        cls.addClassCleanup(cls.cleanup_cluster)
         cls.socket.mkdir(mode=0o700)
         # An allowlist, not a copy of os.environ: no PG*, Supabase, secrets,
         # service files, or user startup configuration can reach subprocesses.
@@ -40,8 +42,6 @@ class StoragePolicyAuditPostgresTests(unittest.TestCase):
         cls.run_tool("initdb", "-D", str(cls.data), "-U", "audit_owner",
                      "--no-locale", "--encoding=UTF8",
                      "--auth-local=trust", "--auth-host=reject")
-        # Register before startup so even partial startup failure is cleaned up.
-        cls.addClassCleanup(cls.stop_cluster)
         options = shlex.join([
             "-c", "listen_addresses=",
             "-c", f"unix_socket_directories={cls.socket}",
@@ -53,16 +53,55 @@ class StoragePolicyAuditPostgresTests(unittest.TestCase):
 
     @classmethod
     def run_tool(cls, name, *args, input=None):
-        result = subprocess.run(
-            [cls.tools[name], *args], input=input, env=cls.env,
-            capture_output=True, text=True, timeout=30,
-        )
+        try:
+            result = subprocess.run(
+                [cls.tools[name], *args], input=input, env=cls.env,
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # TimeoutExpired can contain bytes even with text=True.
+            output = [
+                value.decode(errors="replace") if isinstance(value, bytes)
+                else value or ""
+                for value in (exc.stdout, exc.stderr)
+            ]
+            raise RuntimeError(
+                f"Local {name} timed out after {exc.timeout}s:\n"
+                + "\n".join(output) + cls.server_diagnostics()
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"Local {name} could not execute: {exc}"
+                + cls.server_diagnostics()
+            ) from exc
         if result.returncode:
             raise RuntimeError(
                 f"Local {name} failed ({result.returncode}):\n"
                 f"{result.stdout}\n{result.stderr}"
+                + cls.server_diagnostics()
             )
         return result.stdout
+
+    @classmethod
+    def server_diagnostics(cls):
+        log = cls.root / "server.log"
+        try:
+            return f"\nLocal server log ({log}):\n{log.read_text(errors='replace')}"
+        except OSError:
+            return f"\nLocal server log unavailable: {log}"
+
+    @classmethod
+    def cleanup_cluster(cls):
+        try:
+            cls.stop_cluster()
+            if (cls.data / "postmaster.pid").exists():
+                raise RuntimeError("postmaster.pid still exists after shutdown")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Local cluster shutdown could not be confirmed; preserved "
+                f"{cls.root} for recovery.\n{exc}" + cls.server_diagnostics()
+            ) from exc
+        shutil.rmtree(cls.root)
 
     @classmethod
     def stop_cluster(cls):
@@ -303,3 +342,174 @@ class StoragePolicyAuditPostgresTests(unittest.TestCase):
             ALTER TABLE storage.objects FORCE ROW LEVEL SECURITY;
         """)
         self.assertTrue(self.report()["objects_table"]["rls_forced"])
+
+
+class StoragePolicyAuditHarnessFailureTests(unittest.TestCase):
+    """Exercise unittest's real class-cleanup lifecycle, with no processes."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="audit-harness-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "cluster"
+        self.root.mkdir()
+
+    def run_harness(self, *, init_failure=None, start_failure=None,
+                    stop_failure=None, startup_pid=True, lingering_pid=False,
+                    body_failure=False):
+        def probe(test):
+            if body_failure:
+                raise AssertionError("permission assertion failed")
+
+        harness = type("DisposableHarnessProbe", (StoragePolicyAuditPostgresTests,), {
+            "setUp": lambda test: None,
+            "runTest": probe,
+        })
+        calls = []
+
+        def execute(command, **kwargs):
+            calls.append(command)
+            self.assertEqual(kwargs["env"], {
+                "LC_ALL": "C", "HOME": str(self.root),
+            })
+            self.assertEqual(kwargs["timeout"], 30)
+            self.assertTrue(kwargs["capture_output"])
+            self.assertTrue(kwargs["text"])
+            tool = Path(command[0]).name
+            if tool == "initdb":
+                harness.data.mkdir()
+                failure = init_failure
+            else:
+                self.assertEqual(tool, "pg_ctl")
+                if command[-1] == "start":
+                    (self.root / "server.log").write_text("server diagnostic\n")
+                    if startup_pid:
+                        (harness.data / "postmaster.pid").write_text("fake pid\n")
+                    failure = start_failure
+                else:
+                    self.assertEqual(command[-1], "stop")
+                    self.assertIn("immediate", command)
+                    failure = stop_failure
+                    if failure is None and not lingering_pid:
+                        (harness.data / "postmaster.pid").unlink()
+            if isinstance(failure, BaseException):
+                raise failure
+            return subprocess.CompletedProcess(
+                command, 1 if failure else 0,
+                stdout=f"{failure or tool} stdout",
+                stderr=f"{failure or tool} stderr",
+            )
+
+        # Even on a machine without PostgreSQL, all subprocesses stay mocked.
+        with patch.object(shutil, "which", side_effect=lambda name: f"/offline/{name}"), \
+                patch.object(tempfile, "mkdtemp", return_value=str(self.root)), \
+                patch.object(subprocess, "run", side_effect=execute):
+            result = unittest.TestResult()
+            unittest.TestSuite([harness("runTest")]).run(result)
+        diagnostics = "\n".join(text for _, text in result.errors + result.failures)
+        return result, calls, diagnostics
+
+    @staticmethod
+    def timeout():
+        return subprocess.TimeoutExpired(
+            ["mocked-tool"], 30, output=b"partial stdout", stderr=b"partial stderr",
+        )
+
+    def assert_stop_attempted(self, calls):
+        stops = [call for call in calls if call[-1] == "stop"]
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(stops[0][2], str(self.root / "data"))
+
+    def test_initdb_failures_remove_partial_directory_without_starting_server(self):
+        for failure in ("init failure", self.timeout(), OSError("cannot execute")):
+            with self.subTest(failure=failure):
+                if not self.root.exists():
+                    self.root.mkdir()
+                result, calls, diagnostics = self.run_harness(init_failure=failure)
+                self.assertEqual(len(result.errors), 1)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(Path(calls[0][0]).name, "initdb")
+                self.assertFalse(self.root.exists())
+                self.assertIn("Local initdb", diagnostics)
+
+    def test_partial_startup_failures_always_attempt_shutdown(self):
+        for failure in ("start failure", self.timeout(), OSError("startup error")):
+            with self.subTest(failure=failure):
+                if not self.root.exists():
+                    self.root.mkdir()
+                result, calls, diagnostics = self.run_harness(start_failure=failure)
+                self.assertEqual(len(result.errors), 1)
+                self.assert_stop_attempted(calls)
+                self.assertFalse(self.root.exists())
+                self.assertIn("server diagnostic", diagnostics)
+                if isinstance(failure, subprocess.TimeoutExpired):
+                    self.assertIn("partial stdout", diagnostics)
+                    self.assertIn("partial stderr", diagnostics)
+                    self.assertIn("timed out after 30s", diagnostics)
+                elif isinstance(failure, str):
+                    self.assertIn("start failure stdout", diagnostics)
+                    self.assertIn("start failure stderr", diagnostics)
+                else:
+                    self.assertIn("startup error", diagnostics)
+
+    def test_start_failure_without_pid_removes_directory(self):
+        result, calls, diagnostics = self.run_harness(
+            start_failure="no server started", startup_pid=False,
+        )
+        self.assertEqual(len(result.errors), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(self.root.exists())
+        self.assertIn("server diagnostic", diagnostics)
+
+    def test_shutdown_failures_preserve_cluster_and_log(self):
+        for failure in ("stop failure", self.timeout(), OSError("shutdown error")):
+            with self.subTest(failure=failure):
+                result, calls, diagnostics = self.run_harness(stop_failure=failure)
+                self.assertEqual(len(result.errors), 1)
+                self.assert_stop_attempted(calls)
+                self.assertTrue((self.root / "data" / "postmaster.pid").exists())
+                self.assertEqual(
+                    (self.root / "server.log").read_text(), "server diagnostic\n",
+                )
+                self.assertIn(f"preserved {self.root}", diagnostics)
+                self.assertIn("server diagnostic", diagnostics)
+                if isinstance(failure, subprocess.TimeoutExpired):
+                    self.assertIn("partial stdout", diagnostics)
+                    self.assertIn("partial stderr", diagnostics)
+                # Only this test's fake cluster may be removed manually.
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+
+    def test_start_and_stop_errors_both_survive_class_cleanup(self):
+        result, calls, diagnostics = self.run_harness(
+            start_failure="original startup error",
+            stop_failure="secondary shutdown error",
+        )
+        self.assertEqual(len(result.errors), 2)
+        self.assert_stop_attempted(calls)
+        self.assertIn("original startup error stdout", diagnostics)
+        self.assertIn("secondary shutdown error stderr", diagnostics)
+        self.assertIn(f"preserved {self.root}", diagnostics)
+        self.assertTrue((self.root / "data" / "postmaster.pid").exists())
+
+    def test_successful_stop_with_lingering_pid_does_not_delete_cluster(self):
+        result, calls, diagnostics = self.run_harness(lingering_pid=True)
+        self.assertEqual(len(result.errors), 1)
+        self.assert_stop_attempted(calls)
+        self.assertTrue((self.root / "data" / "postmaster.pid").exists())
+        self.assertIn("postmaster.pid still exists", diagnostics)
+        self.assertIn(f"preserved {self.root}", diagnostics)
+
+    def test_failed_permission_assertion_still_shuts_down_and_removes_cluster(self):
+        result, calls, diagnostics = self.run_harness(body_failure=True)
+        self.assertEqual(len(result.failures), 1)
+        self.assertEqual(result.errors, [])
+        self.assert_stop_attempted(calls)
+        self.assertFalse(self.root.exists())
+        self.assertIn("permission assertion failed", diagnostics)
+
+    def test_successful_run_shuts_down_before_removing_cluster(self):
+        result, calls, diagnostics = self.run_harness()
+        self.assertTrue(result.wasSuccessful(), diagnostics)
+        self.assertEqual(result.testsRun, 1)
+        self.assert_stop_attempted(calls)
+        self.assertFalse(self.root.exists())
