@@ -91,14 +91,26 @@ def text_provider() -> str:
     return "mock"
 
 
-async def stream_venture_text(idea: str, angle: str | None = None, avoid: list[dict] | None = None) -> AsyncIterator[str]:
+PRESERVE_SYSTEM_PROMPT = SYSTEM_PROMPT.split("\n\nVARIETY IS MANDATORY.", 1)[0] + """
+
+SELECTED HYBRID: The user has deliberately chosen this specific product, buyer,
+and combination of mechanisms. Develop THAT concept faithfully, not a different
+random wedge. Keep the central product, intended buyer and borrowed mechanisms
+recognizable. Explain technical constraints honestly rather than promising an
+unsafe or impossible build. Any proposed correction must retain the core intent.
+"""
+
+
+async def stream_venture_text(idea: str, angle: str | None = None, avoid: list[dict] | None = None,
+                              preserve: bool = False) -> AsyncIterator[str]:
     provider = text_provider()
-    msg = build_user_message(idea, angle, avoid)
+    msg = build_user_message(idea, angle, None if preserve else avoid)
+    system = PRESERVE_SYSTEM_PROMPT if preserve else SYSTEM_PROMPT
     if provider == "anthropic":
-        async for chunk in _stream_anthropic(msg):
+        async for chunk in _stream_anthropic(msg, system=system):
             yield chunk
     elif provider == "openai":
-        async for chunk in _stream_openai(msg):
+        async for chunk in _stream_openai(msg, system=system):
             yield chunk
     else:
         async for chunk in _stream_mock(idea):
@@ -177,7 +189,7 @@ async def stream_refinement_text(venture: dict, context: str) -> AsyncIterator[s
             yield text[i:i + 24]
 
 
-async def _stream_anthropic(msg: str) -> AsyncIterator[str]:
+async def _stream_anthropic(msg: str, system: str = SYSTEM_PROMPT) -> AsyncIterator[str]:
     import anthropic
 
     client = anthropic.AsyncAnthropic()
@@ -185,7 +197,7 @@ async def _stream_anthropic(msg: str) -> AsyncIterator[str]:
     async with client.messages.stream(
         model=model,
         max_tokens=2200,
-        system=SYSTEM_PROMPT,
+        system=system,
         messages=[
             {"role": "user", "content": msg},
         ],
@@ -194,7 +206,7 @@ async def _stream_anthropic(msg: str) -> AsyncIterator[str]:
             yield text
 
 
-async def _stream_openai(msg: str) -> AsyncIterator[str]:
+async def _stream_openai(msg: str, system: str = SYSTEM_PROMPT) -> AsyncIterator[str]:
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI()
@@ -202,7 +214,7 @@ async def _stream_openai(msg: str) -> AsyncIterator[str]:
     kwargs = {"reasoning": {"effort": "low"}} if model.startswith("gpt-5") else {}
     stream = await client.responses.create(
         model=model,
-        instructions=SYSTEM_PROMPT,
+        instructions=system,
         input=msg,
         stream=True,
         **kwargs,

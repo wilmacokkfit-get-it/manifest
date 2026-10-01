@@ -86,6 +86,7 @@ TRUST_VISITOR_HEADER = os.environ.get("TRUST_VISITOR_HEADER", "0") == "1" and no
 
 from app import llm  # noqa: E402
 from app import architect as arch  # noqa: E402
+from app import mixer  # noqa: E402
 from app.partial_json import parse_partial  # noqa: E402
 from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
 from app.store import RENDER_LEASE_SECONDS, build_store, day_start_iso, hours_ago_iso, lease_expired  # noqa: E402
@@ -220,7 +221,7 @@ async def _identity_cookie(request: Request, call_next):
     if not token or len(token) < 16:
         token, fresh = new_token(), True
     request.state.owner = token
-    if request.url.path.startswith(("/api/manifest", "/api/ventures/", "/api/venture-images/", "/renders/")):
+    if request.url.path.startswith(("/api/manifest", "/api/mix/", "/api/ventures/", "/api/venture-images/", "/renders/")):
         request.state.app_owner_token = await app_owner_token(request)
     response = await call_next(request)
     if fresh and not (TRUST_VISITOR_HEADER and request.headers.get("x-visitor-id")):
@@ -425,11 +426,18 @@ def _sse(event: str, data) -> str:
 
 class ManifestBody(BaseModel):
     idea: str = Field(min_length=8, max_length=300)
+    mix_id: str | None = Field(default=None, max_length=100)
 
 
 @app.post("/api/manifest")
 async def manifest(body: ManifestBody, request: Request):
     idea = " ".join(body.idea.split())
+    chosen = None
+    if body.mix_id:
+        saved_mix = _mix_snapshot(body.mix_id, "mix", _owner_token(request))
+        chosen = next((c for c in saved_mix["concepts"] if " ".join(c["sentence"].split()) == idea), None)
+        if not chosen:
+            raise HTTPException(422, "Choose an unchanged concept from this mix, or submit your own sentence without a mix.")
     caller = _caller_id(request)
     unlimited = await is_app_owner(request)
     if not unlimited:
@@ -439,8 +447,11 @@ async def manifest(body: ManifestBody, request: Request):
     owner = _owner_token(request)
     created_at = now_iso()
     prov = mint(idea, created_at, owner)
-    avoid = await store.recent_concepts(owner)
+    avoid = [] if chosen else await store.recent_concepts(owner)
     angle = random.choice(llm.ANGLES)
+    if chosen:
+        angle = ("Preserve this selected hybrid's exact product, buyer and borrowed mechanisms. "
+                 "Do not reinterpret it as an unrelated venture. Concept: " + json.dumps(chosen, ensure_ascii=False))
 
     async def gen():
         yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at})
@@ -448,7 +459,10 @@ async def manifest(body: ManifestBody, request: Request):
         last_emit = 0.0
         last_key = None
         try:
-            async for chunk in llm.stream_venture_text(idea, angle=angle, avoid=avoid):
+            stream_options = {"angle": angle, "avoid": avoid}
+            if chosen:
+                stream_options["preserve"] = True
+            async for chunk in llm.stream_venture_text(idea, **stream_options):
                 buf += chunk
                 now = time.time()
                 obj, key = parse_partial(buf)
@@ -1006,6 +1020,116 @@ async def marketplace():
 # ---------------------------------------------------------------------------
 # The Architect: cross-Floor readings, cached, regenerated only when the rows change
 # ---------------------------------------------------------------------------
+# Ephemeral research expires after an hour; never silently substitute a new set.
+_MIX_SNAPSHOTS: dict[str, dict] = {}
+_MIX_HITS: dict[str, deque] = defaultdict(deque)
+_MIX_GLOBAL: deque = deque()
+MIX_TTL = 3600
+
+
+def _mix_save(kind: str, owner: str, payload: dict) -> str:
+    now = time.time()
+    for key in list(_MIX_SNAPSHOTS):
+        if _MIX_SNAPSHOTS[key]["expires"] <= now:
+            del _MIX_SNAPSHOTS[key]
+    if len(_MIX_SNAPSHOTS) >= 256:
+        del _MIX_SNAPSHOTS[next(iter(_MIX_SNAPSHOTS))]
+    token = new_token()
+    _MIX_SNAPSHOTS[token] = {"kind": kind, "owner": owner, "expires": now + MIX_TTL, **payload}
+    return token
+
+
+def _mix_snapshot(token: str, kind: str, owner: str) -> dict:
+    row = _MIX_SNAPSHOTS.get(token)
+    if not row or row["kind"] != kind or row["owner"] != owner or row["expires"] <= time.time():
+        raise HTTPException(410, "This research or mix has expired. Research again to make a fresh combination.")
+    return row
+
+
+async def _mix_rate(request: Request) -> None:
+    if await is_app_owner(request):
+        return
+    now = time.time()
+    for key in list(_MIX_HITS):
+        q = _MIX_HITS[key]
+        while q and now - q[0] >= 86400:
+            q.popleft()
+        if not q:
+            del _MIX_HITS[key]
+    q = _MIX_HITS[_caller_id(request)]
+    while _MIX_GLOBAL and now - _MIX_GLOBAL[0] >= 86400:
+        _MIX_GLOBAL.popleft()
+    if sum(now - t < 3600 for t in q) >= 6 or len(q) >= 12:
+        raise HTTPException(429, "Research and mixing are limited to six runs an hour and twelve a day. Try again later.")
+    if len(_MIX_GLOBAL) >= 100:
+        raise HTTPException(429, "Today's market research capacity has been reached. Try again tomorrow.")
+    # Reserve before awaiting the provider so concurrent requests cannot evade limits.
+    q.append(now)
+    _MIX_GLOBAL.append(now)
+
+
+class ResearchBody(BaseModel):
+    topic: str = Field(default="", max_length=120)
+
+
+class CombineBody(BaseModel):
+    research_id: str = Field(min_length=1, max_length=100)
+    trend_ids: list[str] = Field(min_length=1, max_length=3)
+    floor_slugs: list[str] = Field(default_factory=list, max_length=3)
+
+
+@app.get("/api/mix/floor")
+async def mix_floor():
+    return {"ventures": [mixer.floor_brief(v) for v in await store.list_public(80)
+                         if v.get("visibility") == "public" and v.get("status") == "ready"]}
+
+
+@app.post("/api/mix/research")
+async def mix_research(body: ResearchBody, request: Request):
+    await _mix_rate(request)
+    try:
+        trends = await mixer.research(" ".join(body.topic.split()))
+    except Exception:
+        raise HTTPException(502, "Live research could not return verified source links. Try again shortly.")
+    owner = _owner_token(request)
+    token = _mix_save("research", owner, {"trends": trends})
+    from datetime import datetime, timezone
+    return {"research_id": token, "researched_at": now_iso(),
+            "expires_at": datetime.fromtimestamp(_MIX_SNAPSHOTS[token]["expires"], timezone.utc).isoformat(),
+            "trends": trends}
+
+
+@app.post("/api/mix/combine")
+async def mix_combine(body: CombineBody, request: Request):
+    owner = _owner_token(request)
+    research = _mix_snapshot(body.research_id, "research", owner)
+    trend_ids, slugs = body.trend_ids, body.floor_slugs
+    if (not 2 <= len(trend_ids) + len(slugs) <= 3
+            or len(set(trend_ids)) != len(trend_ids) or len(set(slugs)) != len(slugs)):
+        raise HTTPException(422, "Choose two or three different ingredients, including a market trend.")
+    by_id = {t["id"]: t for t in research["trends"]}
+    if any(t not in by_id for t in trend_ids):
+        raise HTTPException(422, "Choose trends from the current research.")
+    floor = []
+    for slug in slugs:
+        if len(slug) > 80:
+            raise HTTPException(422, "Invalid Floor selection.")
+        row = await store.get_by_slug(slug)
+        if not row or row.get("visibility") != "public" or row.get("status") != "ready":
+            raise HTTPException(404, "A selected venture is no longer on the public Floor.")
+        floor.append(mixer.floor_brief(row))
+    trends = [by_id[t] for t in trend_ids]
+    await _mix_rate(request)
+    try:
+        concepts = await mixer.combine(trends, floor)
+    except Exception:
+        raise HTTPException(502, "The engine couldn't make three concrete combinations. Try different ingredients.")
+    sources = {s["url"]: s for t in trends for s in t["sources"]}
+    token = _mix_save("mix", owner, {"concepts": concepts})
+    return {"mix_id": token, "concepts": concepts, "sources": list(sources.values()),
+            "floor": [{"slug": v["slug"], "name": v["name"]} for v in floor], "generated_at": now_iso()}
+
+
 _ARCH_TASK: asyncio.Task | None = None
 _ARCH_LAST_RUN = 0.0
 ARCH_MIN_INTERVAL = int(os.environ.get("ARCHITECT_MIN_INTERVAL", "300"))   # seconds between regenerations
@@ -1175,6 +1299,7 @@ def _shell(og: dict | None = None) -> str:
 @app.get("/waitlist", response_class=HTMLResponse)
 @app.get("/about", response_class=HTMLResponse)
 @app.get("/architect", response_class=HTMLResponse)
+@app.get("/mix", response_class=HTMLResponse)
 async def index():
     return _shell()
 

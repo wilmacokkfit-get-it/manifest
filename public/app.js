@@ -103,6 +103,7 @@
     if (route === '/waitlist') { mount(WaitlistView(), '/waitlist'); return; }
     if (route === '/about') { mount(AboutView(), null); return; }
     if (route === '/architect') { mount(ArchitectView(), '/architect'); return; }
+    if (route === '/mix') { mount(MixView(), '/mix'); return; }
     mount(NotFound('No page lives at this address.'), null);
   }
 
@@ -127,24 +128,37 @@
   ideaInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ideaForm.requestSubmit(); } });
   $('#cta-top').addEventListener('click', (e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); setTimeout(() => ideaInput.focus(), 500); });
 
-  let pendingSentence = null;   // set by "Manifest this" on a crossbreed; consumed when the orb shows
+  let pendingSentence = null;
+  let pendingMixId = null;
+  let pendingMixSentence = null;
+  // Manual edits always detach the sentence from its source mix.
+  ideaInput.addEventListener('input', () => {
+    if (pendingMixSentence !== null && ideaInput.value !== pendingMixSentence) {
+      pendingMixId = null;
+      pendingMixSentence = null;
+    }
+  });
   function resetHero() {
     orbWrap.classList.remove('forming'); formingName.textContent = ''; formingStatus.textContent = '';
     heroError.textContent = ''; heroTag.style.opacity = '';
     if (pendingSentence) {
-      ideaInput.value = pendingSentence; pendingSentence = null;
+      const sentence = pendingSentence;
+      pendingSentence = null;
+      ideaInput.value = sentence;
+      pendingMixSentence = sentence;
       ideaInput.dispatchEvent(new Event('input'));
       setTimeout(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); ideaInput.focus(); ideaInput.setSelectionRange(ideaInput.value.length, ideaInput.value.length); }, 80);
     }
   }
-  function manifestSentence(sentence) { pendingSentence = sentence; go('/'); }
+  function manifestSentence(sentence, mixId = null) { pendingSentence = sentence; pendingMixId = mixId; go('/'); }
 
   ideaForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const idea = ideaInput.value.trim();
     if (idea.length < 8) { heroError.textContent = 'Give it a full sentence.'; return; }
     heroError.textContent = '';
-    startManifest(idea);
+    const mixId = pendingMixSentence === idea ? pendingMixId : null;
+    startManifest(idea, mixId);
   });
 
   function checkReveals() {
@@ -156,7 +170,7 @@
   addEventListener('resize', checkReveals);
 
   // ---------- the reveal ----------
-  async function startManifest(idea) {
+  async function startManifest(idea, mixId = null) {
     orbWrap.classList.add('forming');
     heroTag.style.opacity = '0';
     let pi = 0; formingStatus.textContent = phrases[0];
@@ -173,7 +187,7 @@
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea }),
+        body: JSON.stringify({ idea, ...(mixId ? { mix_id: mixId } : {}) }),
       });
       if (!res.ok || !res.body) {
         let msg = 'The engine is unavailable right now.';
@@ -208,6 +222,7 @@
             } else view.update(data, streaming);
           } else if (ev.event === 'done') {
             done = true; finish();
+            if (pendingMixSentence === idea) { pendingMixId = null; pendingMixSentence = null; }
             if (!moved) { view = VentureView({ live: { meta, data: ev.data, streaming: null, idea } }); mount(view, null); }
             view.complete(ev.data);
             history.replaceState({}, '', href(`/v/${ev.data.slug}`));
@@ -1007,7 +1022,11 @@
         h('h2', { text: 'What the Floor looks like from above.' }),
         h('p', { class: 'lead', text: 'Every creator sees their own venture. The Architect reads all of them at once: whose paths call for the same shop, whose buyers overlap, which asks one supplier could fill together, where the real signals are landing, and what is stalled.' }),
         counts, status),
-      list, crossSec, facts);
+        list, crossSec, facts,
+        h('a', { class: 'arch-strip', href: href('/mix'), 'data-route': '/mix' },
+          h('span', { class: 'eyebrow', text: 'A different kind of reading' }),
+          h('div', { class: 'as-title', text: 'Mix live product signals with the Floor.' }),
+          h('span', { class: 'as-sub', text: 'Bring evidence and real ventures into one new combination →' })));
     let timer = null;
     const fmtWhen = (iso) => iso ? fmtDate(iso, true) : '';
     const load = async () => {
@@ -1064,6 +1083,208 @@
     }
     load();
     root.cleanup = () => clearTimeout(timer);
+    return root;
+  }
+
+  // ---------- trend + Floor mixer ----------
+  function MixView() {
+    const trends = [];
+    const floor = [];
+    const selectedTrends = new Set();
+    const selectedFloor = new Set();
+    let researchId = null;
+    let busy = false;
+
+    const topic = h('input', { id: 'mix-topic', class: 'mix-topic', type: 'text', maxlength: '120', placeholder: 'e.g. quieter ways to manage household energy', 'aria-label': 'Product research topic', required: true });
+    const researchStatus = h('p', { class: 'mix-status', role: 'status', 'aria-live': 'polite' });
+    const trendList = h('div', { class: 'mix-trends', 'aria-label': 'Sourced product trends' });
+    const floorList = h('div', { class: 'mix-floor-list', 'aria-label': 'Public Floor ventures' });
+    const resultList = h('div', { class: 'mix-results', 'aria-live': 'polite' });
+    const combineStatus = h('p', { class: 'mix-status', role: 'status', 'aria-live': 'polite' });
+    const combineButton = h('button', { class: 'btn primary', type: 'button', text: 'Generate hybrids →', disabled: true });
+    const researchButton = h('button', { class: 'btn primary', type: 'submit', text: 'Research the live edge →' });
+    const selectNote = h('p', { class: 'mix-select-note', text: 'Select 2–3 ingredients total, including at least one product trend.' });
+    const root = h('section', { class: 'view mix-page' },
+      h('header', { class: 'mix-head' },
+        h('div', { class: 'eyebrow', text: 'The Mix / 01' }),
+        h('h1', {}, 'Steal a mechanism.', h('br'), 'Give it a new life.'),
+        h('p', { class: 'lead', text: 'Live product research meets ventures already on MANIFEST’s public Floor. Find the useful collision; then give it a first test.' }),
+        h('p', { class: 'mix-disclaimer', text: 'Sources are evidence, not certainty. Floor signals are real public responses—not proof of market demand. Novelty is not guaranteed.' })),
+      h('form', { class: 'mix-research', onsubmit: async (e) => {
+        e.preventDefault();
+        const value = topic.value.trim();
+        if (!value || value.length > 120) { researchStatus.textContent = 'Enter a topic between 1 and 120 characters.'; topic.focus(); return; }
+        busy = true;
+        researchButton.disabled = true;
+        topic.disabled = true;
+        updateEligibility();
+        researchStatus.textContent = 'Searching for sourced product mechanisms…';
+        researchStatus.classList.add('caret');
+        trendList.replaceChildren(h('div', { class: 'mix-skeleton' }, h('i'), h('i'), h('i')));
+        root.querySelector('.mix-output').classList.add('hidden');
+        resultList.replaceChildren();
+        try {
+          const data = await api('/api/mix/research', { method: 'POST', body: JSON.stringify({ topic: value }) });
+          researchId = data.research_id;
+          trends.splice(0, trends.length, ...(Array.isArray(data.trends) ? data.trends : []));
+          selectedTrends.clear();
+          renderTrends(data);
+          researchStatus.textContent = `Research captured ${fmtDate(data.researched_at, true)} · expires ${fmtDate(data.expires_at, true)}.`;
+          researchStatus.classList.remove('caret');
+          updateEligibility();
+        } catch (error) {
+          trends.splice(0);
+          researchId = null;
+          trendList.replaceChildren(h('div', { class: 'mix-error' }, h('b', { text: 'Research did not complete.' }), h('span', { text: error.message }), h('button', { class: 'btn small', type: 'button', text: 'Try again', onclick: () => researchButton.click() })));
+          researchStatus.textContent = '';
+        } finally {
+          busy = false;
+          researchButton.disabled = false;
+          topic.disabled = false;
+          updateEligibility();
+        }
+      } }, h('label', { for: 'mix-topic', text: 'What product territory should we search?' }),
+      h('div', { class: 'mix-form-row' }, topic, researchButton),
+      h('p', { class: 'mix-help', text: 'Research returns dated, linked evidence. Nothing is substituted if research fails.' }),
+      researchStatus),
+      h('div', { class: 'mix-columns' },
+        h('section', { class: 'mix-panel' }, h('div', { class: 'mix-panel-head' }, h('span', { class: 'mix-index', text: 'A' }), h('div', {}, h('h2', { text: 'Product mechanisms' }), h('p', { text: 'Select up to three sourced trends.' }))), trendList),
+        h('section', { class: 'mix-panel floor-panel' }, h('div', { class: 'mix-panel-head' }, h('span', { class: 'mix-index', text: 'B' }), h('div', {}, h('h2', { text: 'The public Floor' }), h('p', { text: 'Real ventures and their buy / build / fund signals.' }))), floorList)),
+      h('div', { class: 'mix-action' }, selectNote, combineButton, combineStatus),
+      h('section', { class: 'mix-output hidden' }, h('div', { class: 'mix-output-head' }, h('div', { class: 'eyebrow', text: 'The collision' }), h('h2', { text: 'Three ways this could exist.' }), h('p', { class: 'mix-output-date' })), resultList));
+
+    function currentTotal() { return selectedTrends.size + selectedFloor.size; }
+    function updateEligibility() {
+      const count = currentTotal();
+      combineButton.disabled = busy || !researchId || selectedTrends.size < 1 || count < 2 || count > 3;
+      selectNote.textContent = !floor.length && count >= 1
+        ? 'No public Floor ventures are available right now. You can still select multiple trends; this mix will have no Floor evidence.'
+        : `Selected ${count} of 3 ingredients · at least one trend required.`;
+      root.querySelectorAll('.mix-choice').forEach(btn => {
+        const isSelected = btn.getAttribute('aria-pressed') === 'true';
+        btn.disabled = busy || (!isSelected && count >= 3);
+      });
+    }
+    function toggle(set, id, btn) {
+      if (set.has(id)) set.delete(id);
+      else if (currentTotal() < 3) set.add(id);
+      btn.setAttribute('aria-pressed', String(set.has(id)));
+      btn.classList.toggle('selected', set.has(id));
+      updateEligibility();
+    }
+    function sourcesEl(sources) {
+      if (!Array.isArray(sources) || !sources.length) return h('span', { class: 'mix-no-sources', text: 'No source links returned.' });
+      return h('div', { class: 'mix-sources' }, ...sources.map(source => {
+        let valid = false;
+        try { valid = new URL(source.url).protocol === 'https:' || new URL(source.url).protocol === 'http:'; } catch (_) {}
+        return valid ? h('a', { href: source.url, target: '_blank', rel: 'noopener noreferrer', class: 'mix-source' }, source.title || source.url, h('span', { 'aria-hidden': 'true', text: ' ↗' }))
+          : h('span', { class: 'mix-source unavailable', text: source.title || 'Source link unavailable' });
+      }));
+    }
+    function renderTrends(data) {
+      if (!trends.length) {
+        trendList.replaceChildren(h('p', { class: 'mix-empty', text: 'Research returned no product trends. Try another topic; nothing has been invented to fill the gap.' }));
+        return;
+      }
+      trendList.replaceChildren(...trends.map((trend, index) => {
+        const button = h('button', { class: 'mix-choice trend-choice', type: 'button', 'aria-pressed': 'false', onclick: () => toggle(selectedTrends, trend.id, button) },
+          h('span', { class: 'mix-choice-top' }, h('span', { class: 'mix-kind', text: `Trend ${String(index + 1).padStart(2, '0')}` }), h('span', { class: 'mix-date', text: trend.source_date || 'Date unknown' })),
+          h('strong', { text: trend.title }),
+          h('span', { class: 'mix-product', text: trend.product }),
+          h('span', { class: 'mix-mechanism' }, h('b', { text: 'Mechanism' }), trend.mechanism),
+          h('span', { class: 'mix-evidence' }, h('b', { text: 'Evidence' }), trend.evidence));
+        return h('article', { class: 'mix-entry' }, button, sourcesEl(trend.sources));
+      }));
+      updateEligibility();
+    }
+    function renderFloor() {
+      if (!floor.length) {
+        floorList.replaceChildren(h('div', { class: 'mix-empty-floor' }, h('span', { class: 'mix-empty-mark', 'aria-hidden': 'true' }, '—'), h('p', { text: 'No public ventures on the Floor yet.' }), h('small', { text: 'Research and select multiple trends instead. No Floor evidence will be implied.' })));
+        return;
+      }
+      floorList.replaceChildren(...floor.map((venture, index) => {
+        const sig = venture.signals || {};
+        const button = h('button', { class: 'mix-choice floor-choice', type: 'button', 'aria-pressed': 'false', onclick: () => toggle(selectedFloor, venture.slug, button) },
+          h('span', { class: 'mix-choice-top' }, h('span', { class: 'mix-kind', text: `Floor / ${String(index + 1).padStart(2, '0')}` }), h('span', { class: 'mix-category', text: venture.category || 'Venture' })),
+          h('strong', { text: venture.name }),
+          h('span', { class: 'mix-product', text: venture.tagline }),
+          h('span', { class: 'mix-evidence', text: venture.description }),
+          h('span', { class: 'mix-signals' }, ...[['buy', 'Buy'], ['build', 'Build'], ['fund', 'Fund']].map(([key, label]) => h('span', {}, h('b', { text: String(sig[key] ?? '—') }), ` ${label}`))));
+        const link = h('a', { class: 'mix-venture-link', href: href(`/v/${venture.slug}`), 'data-route': `/v/${venture.slug}` }, 'Open venture record →');
+        return h('article', { class: 'mix-entry' }, button, link);
+      }));
+    }
+    floorList.replaceChildren(h('div', { class: 'mix-skeleton' }, h('i'), h('i')));
+    function renderConcepts(data) {
+      const concepts = Array.isArray(data.concepts) ? data.concepts : [];
+      const output = root.querySelector('.mix-output');
+      output.classList.remove('hidden');
+      output.querySelector('.mix-output-date').textContent = `Generated ${data.generated_at ? fmtDate(data.generated_at, true) : 'date unavailable'} · novelty is not guaranteed.`;
+      const oldEvidence = output.querySelector('.mix-result-evidence');
+      if (oldEvidence) oldEvidence.remove();
+      resultList.replaceChildren(...concepts.map((concept, index) => {
+        const sentence = String(concept.sentence || '').slice(0, 300);
+        return h('article', { class: 'mix-concept' },
+          h('div', { class: 'mix-concept-index', text: `0${index + 1}` }),
+          h('h3', { text: concept.name }),
+          h('p', { class: 'mix-stole' }, h('b', { text: 'The borrowed mechanism' }), concept.stole),
+          h('p', { class: 'mix-hybrid', text: concept.hybrid }),
+          h('div', { class: 'mix-details' },
+            h('p', {}, h('b', { text: 'Buyer' }), concept.buyer),
+            h('p', {}, h('b', { text: 'Why now' }), concept.why_now),
+            h('p', {}, h('b', { text: 'First test' }), concept.first_test),
+            h('p', {}, h('b', { text: 'Closest existing' }), concept.closest_existing)),
+          h('div', { class: 'mix-concept-foot' },
+            h('span', { class: 'mix-sentence', text: sentence }),
+            h('button', { class: 'btn primary small', type: 'button', text: 'Manifest this →', disabled: !sentence, onclick: () => manifestSentence(sentence, data.mix_id) })));
+      }));
+      if (!concepts.length) resultList.replaceChildren(h('p', { class: 'mix-empty', text: 'No concepts were returned. Try combining a different set of ingredients.' }));
+      const floorNames = Array.isArray(data.floor) ? data.floor.map(v => v.name).filter(Boolean) : [];
+      output.append(h('aside', { class: 'mix-result-evidence' },
+        h('h3', { text: 'Evidence behind this mix' }),
+        floorNames.length
+          ? h('p', { text: `Public Floor ventures included: ${floorNames.join(' · ')}. Signals are not proof of demand.` })
+          : h('p', { text: 'No Floor evidence was included in this mix.' }),
+        sourcesEl(data.sources)));
+    }
+    combineButton.addEventListener('click', async () => {
+      if (combineButton.disabled || busy) return;
+      busy = true;
+      combineButton.disabled = true;
+      updateEligibility();
+      combineStatus.textContent = 'Asking the Architect to make the collision concrete…';
+      combineStatus.classList.add('caret');
+      resultList.replaceChildren(h('div', { class: 'mix-skeleton' }, h('i'), h('i'), h('i')));
+      try {
+        const data = await api('/api/mix/combine', { method: 'POST', body: JSON.stringify({
+          research_id: researchId,
+          trend_ids: [...selectedTrends],
+          floor_slugs: [...selectedFloor],
+        }) });
+        renderConcepts(data);
+        combineStatus.textContent = '';
+        combineStatus.classList.remove('caret');
+        root.querySelector('.mix-output').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch (error) {
+        combineStatus.classList.remove('caret');
+        combineStatus.replaceChildren(h('span', { text: error.message }), ' ', h('button', { class: 'btn small', type: 'button', text: 'Try again', onclick: () => combineButton.click() }));
+      } finally {
+        busy = false;
+        updateEligibility();
+      }
+    });
+    async function loadFloor() {
+      floorList.replaceChildren(h('div', { class: 'mix-skeleton' }, h('i'), h('i')));
+      try {
+        const data = await api('/api/mix/floor');
+        floor.splice(0, floor.length, ...(Array.isArray(data.ventures) ? data.ventures : []));
+        renderFloor();
+        updateEligibility();
+      } catch (error) {
+        floorList.replaceChildren(h('div', { class: 'mix-error' }, h('b', { text: 'The Floor could not be loaded.' }), h('span', { text: error.message }), h('button', { class: 'btn small', type: 'button', text: 'Retry Floor', onclick: loadFloor })));
+      }
+    }
+    loadFloor();
     return root;
   }
 

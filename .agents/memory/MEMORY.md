@@ -5,3 +5,4 @@
 - [Recovery fencing](recovery-fencing.md) — second-resolution timestamps are not sufficient to distinguish competing work claims.
 - [Render cleanup safety](render-cleanup-safety.md) — automatic deletion needs retirement fencing; database checks and Storage deletion are not atomic.
 - [Disposable database cleanup](disposable-database-cleanup.md) — failed shutdown must preserve recovery files, not trigger unconditional temporary-directory deletion.
+- [Trend mixing intent](trend-mixing-intent.md) — combine live public evidence with released Floor ventures; preserve chosen mechanisms without promising novelty.
