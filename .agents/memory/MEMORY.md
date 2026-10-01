@@ -2,3 +2,4 @@
 - [Supabase validation boundaries](supabase-validation.md) — successful Storage authentication does not prove access to database tables; validate both before switching backends.
 - [Private image delivery](private-image-delivery.md) — prefer per-request creator checks over bearer-style signed URLs for unreleased renders.
 - [Limited refinement](limited-refinement.md) — the creator wants one optional context response after the first result, not an ongoing chat.
+- [Recovery fencing](recovery-fencing.md) — second-resolution timestamps are not sufficient to distinguish competing work claims.

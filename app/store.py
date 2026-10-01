@@ -30,6 +30,25 @@ import httpx
 from .provenance import now_iso
 
 JSON_FIELDS = ("tiers", "roadmap", "grounding", "image_prompts", "images", "path")
+WORK_LEASE_SECONDS = 300
+RENDER_LEASE_SECONDS = 600
+
+
+def lease_until(seconds: int = WORK_LEASE_SECONDS) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+def lease_expired(marker: dict, key: str, updated_at: str) -> bool:
+    """Legacy claims have no lease; give them the same bounded grace period."""
+    try:
+        raw = marker.get(key)
+        deadline = datetime.fromisoformat((raw or updated_at).replace("Z", "+00:00"))
+        if not raw:
+            deadline += timedelta(seconds=WORK_LEASE_SECONDS)
+        return deadline <= datetime.now(timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        # A malformed legacy timestamp cannot establish a live lease.
+        return True
 
 VENTURE_COLUMNS = [
     "id", "slug", "owner_token", "idea_raw", "idea_hash", "provenance_code",
@@ -65,6 +84,57 @@ def _new_id() -> str:
 
 class RenderAccess:
     """Translate stored references without changing existing records or objects."""
+
+    async def reconcile_venture(self, venture: dict) -> dict:
+        """Lazily reclaim abandoned text work, never a successful refinement.
+
+        Compare the entire observed snapshot when writing: a new claim or a
+        concurrent path/render update must win over this recovery attempt.
+        """
+        grounding = dict(venture.get("grounding") or {})
+        marker = grounding.get("_refinement")
+        marker = dict(marker) if isinstance(marker, dict) else {}
+        status = venture.get("status")
+        if status == "refining" and marker.get("state") == "pending":
+            if not lease_expired(marker, "lease_until", venture.get("updated_at")):
+                return venture
+            grounding.pop("_refinement", None)
+        elif status == "planning":
+            if not lease_expired(marker, "path_lease_until", venture.get("updated_at")):
+                return venture
+            marker.pop("path_claim_id", None)
+            marker.pop("path_lease_until", None)
+            # Choosing a path still consumes the optional refinement.
+            marker.setdefault("state", "skipped")
+            grounding["_refinement"] = marker
+        else:
+            return venture
+        saved = await self._compare_venture(venture, {"grounding": grounding, "status": "ready"})
+        return saved or await self.get_by_id(venture["id"]) or venture
+
+    async def claim_refinement_render(self, venture_id: str) -> dict | None:
+        current = await self.get_by_id(venture_id)
+        if not current or current.get("images_status") != "pending":
+            return None
+        grounding = dict(current.get("grounding") or {})
+        marker = dict(grounding.get("_refinement") or {})
+        if marker.get("state") != "completed":
+            return None
+        if marker.get("render_claim_id") and not lease_expired(
+            marker, "render_lease_until", current.get("updated_at")
+        ):
+            return None
+        marker.update(render_claim_id=_new_id(), render_lease_until=lease_until(RENDER_LEASE_SECONDS))
+        grounding["_refinement"] = marker
+        return await self._compare_venture(current, {"grounding": grounding, "images": []})
+
+    @staticmethod
+    def _render_filename(venture: dict, idx: int, ext: str) -> str:
+        marker = (venture.get("grounding") or {}).get("_refinement") or {}
+        token = marker.get("render_claim_id")
+        if token and re.fullmatch(r"[a-zA-Z0-9-]+", token):
+            return f"{venture['id']}-{token}-{idx}.{ext}"
+        return f"{venture['id']}-{idx}.{ext}"
 
     def _legacy_render_url(self, venture_id: str, idx: int, ext: str) -> str:
         raise NotImplementedError
@@ -207,13 +277,41 @@ class SQLiteStore(RenderAccess):
             self._db.commit()
         return await self.get_by_id(venture_id)
 
+    async def _compare_venture(self, current: dict, fields: dict) -> dict | None:
+        fields = {**fields, "updated_at": now_iso()}
+        enc = self._encode(fields)
+        sets = ", ".join(f"{k} = ?" for k in enc)
+        with self._lock:
+            cur = self._db.execute(
+                f"""UPDATE ventures SET {sets} WHERE id = ? AND status = ?
+                    AND images_status = ? AND updated_at = ?
+                    AND json(grounding) IS json(?)""",
+                [*enc.values(), current["id"], current["status"], current["images_status"],
+                 current["updated_at"], json.dumps(current["grounding"]) if current.get("grounding") is not None else None],
+            )
+            self._db.commit()
+        return await self.get_by_id(current["id"]) if cur.rowcount else None
+
+    async def update_refinement_images(self, venture_id: str, claim_id: str, fields: dict) -> dict | None:
+        enc = self._encode({**fields, "updated_at": now_iso()})
+        sets = ", ".join(f"{k} = ?" for k in enc)
+        with self._lock:
+            cur = self._db.execute(
+                f"""UPDATE ventures SET {sets} WHERE id = ? AND images_status = 'pending'
+                    AND json_extract(grounding, '$._refinement.render_claim_id') = ?""",
+                [*enc.values(), venture_id, claim_id],
+            )
+            self._db.commit()
+        return await self.get_by_id(venture_id) if cur.rowcount else None
+
     async def claim_refinement(
         self, venture_id: str, context: str | None = None, *, skipped: bool = False,
         require_images_finished: bool = True, claim_id: str | None = None,
     ) -> dict | None:
         """Atomically consume the one refinement opportunity (or mark it skipped)."""
         marker = {"state": "skipped"} if skipped else {
-            "state": "pending", "context": context, "claim_id": claim_id,
+            "state": "pending", "context": context, "claim_id": claim_id or _new_id(),
+            "lease_until": lease_until(),
         }
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
@@ -297,6 +395,7 @@ class SQLiteStore(RenderAccess):
             marker = grounding.get("_refinement")
             marker = dict(marker) if isinstance(marker, dict) else {"state": "skipped"}
             marker["path_claim_id"] = claim_id
+            marker["path_lease_until"] = lease_until()
             grounding["_refinement"] = marker
             cur = self._db.execute(
                 """UPDATE ventures SET status = 'planning', grounding = ?, updated_at = ?
@@ -321,6 +420,7 @@ class SQLiteStore(RenderAccess):
             grounding = dict(venture.get("grounding") or {})
             marker = dict(grounding.get("_refinement") or {})
             marker.pop("path_claim_id", None)
+            marker.pop("path_lease_until", None)
             grounding["_refinement"] = marker
             cur = self._db.execute(
                 """UPDATE ventures SET path = ?, status = 'ready', grounding = ?, updated_at = ?
@@ -349,6 +449,7 @@ class SQLiteStore(RenderAccess):
             grounding = dict(venture.get("grounding") or {})
             marker = dict(grounding.get("_refinement") or {})
             marker.pop("path_claim_id", None)
+            marker.pop("path_lease_until", None)
             grounding["_refinement"] = marker
             self._db.execute(
                 """UPDATE ventures SET status = 'ready', grounding = ?, updated_at = ?
@@ -550,7 +651,7 @@ class SQLiteStore(RenderAccess):
         if not url:
             return None
         ext = url.rsplit(".", 1)[1]
-        path = self.renders_dir / f"{venture['id']}-{idx}.{ext}"
+        path = self.renders_dir / self._render_filename(venture, idx, ext)
         if path.resolve().parent != self.renders_dir.resolve():
             return None
         try:
@@ -558,11 +659,14 @@ class SQLiteStore(RenderAccess):
         except FileNotFoundError:
             return None
 
-    async def save_render(self, venture_id: str, idx: int, png: bytes) -> str:
+    async def save_render(self, venture_id: str, idx: int, png: bytes, *, render_claim_id: str | None = None) -> str:
         data, ext, _ = await asyncio.to_thread(compress_render, png)
-        path = self.renders_dir / f"{venture_id}-{idx}.{ext}"
+        filename = self._render_filename(
+            {"id": venture_id, "grounding": {"_refinement": {"render_claim_id": render_claim_id}}}, idx, ext,
+        )
+        path = self.renders_dir / filename
         await asyncio.to_thread(path.write_bytes, data)
-        return f"/renders/{path.name}"
+        return f"/api/venture-images/{venture_id}/{idx}.{ext}" if render_claim_id else f"/renders/{path.name}"
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +742,31 @@ class SupabaseStore(RenderAccess):
                                 prefer="return=representation")
         return data[0] if data else None
 
+    @staticmethod
+    def _snapshot_params(current: dict) -> dict:
+        return {
+            "id": f"eq.{current['id']}", "status": f"eq.{current['status']}",
+            "images_status": f"eq.{current['images_status']}",
+            "updated_at": f"eq.{current['updated_at']}",
+            "grounding": f"eq.{json.dumps(current['grounding'])}" if current.get("grounding") is not None else "is.null",
+        }
+
+    async def _compare_venture(self, current: dict, fields: dict) -> dict | None:
+        data = await self._rest(
+            "PATCH", "ventures", params=self._snapshot_params(current),
+            json_body={**fields, "updated_at": now_iso()}, prefer="return=representation",
+        )
+        return data[0] if data else None
+
+    async def update_refinement_images(self, venture_id: str, claim_id: str, fields: dict) -> dict | None:
+        data = await self._rest(
+            "PATCH", "ventures",
+            params={"id": f"eq.{venture_id}", "images_status": "eq.pending",
+                    "grounding->_refinement->>render_claim_id": f"eq.{claim_id}"},
+            json_body={**fields, "updated_at": now_iso()}, prefer="return=representation",
+        )
+        return data[0] if data else None
+
     async def claim_refinement(
         self, venture_id: str, context: str | None = None, *, skipped: bool = False,
         require_images_finished: bool = True, claim_id: str | None = None,
@@ -648,7 +777,8 @@ class SupabaseStore(RenderAccess):
         grounding = dict(current.get("grounding") or {})
         grounding["_refinement"] = (
             {"state": "skipped"} if skipped else {
-                "state": "pending", "context": context, "claim_id": claim_id,
+                "state": "pending", "context": context, "claim_id": claim_id or _new_id(),
+                "lease_until": lease_until(),
             }
         )
         params = {
@@ -709,8 +839,10 @@ class SupabaseStore(RenderAccess):
         marker = grounding.get("_refinement")
         marker = dict(marker) if isinstance(marker, dict) else {"state": "skipped"}
         marker["path_claim_id"] = claim_id
+        marker["path_lease_until"] = lease_until()
         grounding["_refinement"] = marker
         params = {"id": f"eq.{venture_id}", "status": "eq.ready"}
+        params["grounding"] = self._snapshot_params(current)["grounding"]
         fields = {"status": "planning", "grounding": grounding, "updated_at": now_iso()}
         if current.get("grounding") is None or "_refinement" not in current.get("grounding", {}):
             params["grounding->_refinement"] = "is.null"
@@ -722,9 +854,13 @@ class SupabaseStore(RenderAccess):
                 marker = grounding.get("_refinement")
                 marker = dict(marker) if isinstance(marker, dict) else {"state": "skipped"}
                 marker["path_claim_id"] = claim_id
+                marker["path_lease_until"] = lease_until()
                 grounding["_refinement"] = marker
                 data = await self._rest(
-                    "PATCH", "ventures", params={"id": f"eq.{venture_id}", "status": "eq.ready"},
+                    "PATCH", "ventures", params={
+                        "id": f"eq.{venture_id}", "status": "eq.ready",
+                        "grounding": self._snapshot_params(current)["grounding"],
+                    },
                     json_body={"status": "planning", "grounding": grounding, "updated_at": now_iso()},
                     prefer="return=representation",
                 )
@@ -742,13 +878,16 @@ class SupabaseStore(RenderAccess):
         marker = grounding.get("_refinement")
         if not isinstance(marker, dict) or marker.get("path_claim_id") != claim_id:
             return None
+        marker = dict(marker)
         marker.pop("path_claim_id", None)
+        marker.pop("path_lease_until", None)
         grounding["_refinement"] = marker
         data = await self._rest(
             "PATCH", "ventures",
             params={
                 "id": f"eq.{venture_id}", "status": "eq.planning",
                 "grounding->_refinement->>path_claim_id": f"eq.{claim_id}",
+                "grounding": self._snapshot_params(current)["grounding"],
             },
             json_body={
                 "path": path, "status": "ready", "grounding": grounding, "updated_at": now_iso(),
@@ -767,13 +906,16 @@ class SupabaseStore(RenderAccess):
         marker = grounding.get("_refinement")
         if not isinstance(marker, dict) or marker.get("path_claim_id") != claim_id:
             return
+        marker = dict(marker)
         marker.pop("path_claim_id", None)
+        marker.pop("path_lease_until", None)
         grounding["_refinement"] = marker
         await self._rest(
             "PATCH", "ventures",
             params={
                 "id": f"eq.{venture_id}", "status": "eq.planning",
                 "grounding->_refinement->>path_claim_id": f"eq.{claim_id}",
+                "grounding": self._snapshot_params(current)["grounding"],
             },
             json_body={"status": "ready", "grounding": grounding, "updated_at": now_iso()},
             prefer="return=minimal",
@@ -970,13 +1112,22 @@ class SupabaseStore(RenderAccess):
     def _legacy_render_url(self, venture_id: str, idx: int, ext: str) -> str:
         return f"{self.url}/storage/v1/object/public/{self.bucket}/{venture_id}/{idx}.{ext}"
 
+    @staticmethod
+    def _render_object_path(venture: dict, idx: int, ext: str) -> str:
+        marker = (venture.get("grounding") or {}).get("_refinement") or {}
+        token = marker.get("render_claim_id")
+        if token and re.fullmatch(r"[a-zA-Z0-9-]+", token):
+            return f"{venture['id']}/{token}/{idx}.{ext}"
+        return f"{venture['id']}/{idx}.{ext}"
+
     async def read_render(self, venture: dict, idx: int) -> tuple[bytes, str] | None:
         url = self.render_url(venture, idx)
         if not url:
             return None
         ext = url.rsplit(".", 1)[1]
+        path = self._render_object_path(venture, idx, ext)
         r = await self._client.get(
-            f"/storage/v1/object/authenticated/{self.bucket}/{venture['id']}/{idx}.{ext}",
+            f"/storage/v1/object/authenticated/{self.bucket}/{path}",
         )
         if r.status_code == 404:
             return None
@@ -984,9 +1135,11 @@ class SupabaseStore(RenderAccess):
             raise RuntimeError(f"Storage download failed: {r.status_code}")
         return r.content, f"image/{ext}"
 
-    async def save_render(self, venture_id: str, idx: int, png: bytes) -> str:
+    async def save_render(self, venture_id: str, idx: int, png: bytes, *, render_claim_id: str | None = None) -> str:
         data, ext, mime = await asyncio.to_thread(compress_render, png)
-        path = f"{venture_id}/{idx}.{ext}"
+        path = self._render_object_path(
+            {"id": venture_id, "grounding": {"_refinement": {"render_claim_id": render_claim_id}}}, idx, ext,
+        )
         r = await self._client.post(
             f"/storage/v1/object/{self.bucket}/{path}",
             content=data,

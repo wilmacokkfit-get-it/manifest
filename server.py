@@ -87,7 +87,7 @@ TRUST_VISITOR_HEADER = os.environ.get("TRUST_VISITOR_HEADER", "0") == "1" and no
 from app import llm  # noqa: E402
 from app.partial_json import parse_partial  # noqa: E402
 from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
-from app.store import build_store, day_start_iso, hours_ago_iso  # noqa: E402
+from app.store import RENDER_LEASE_SECONDS, build_store, day_start_iso, hours_ago_iso, lease_expired  # noqa: E402
 
 store = build_store()
 
@@ -457,23 +457,48 @@ async def manifest(body: ManifestBody, request: Request):
 
 
 async def _render_images(v: dict) -> None:
+    marker = (v.get("grounding") or {}).get("_refinement") or {}
+    render_claim_id = None
+    if marker.get("state") == "completed":
+        # Acquisition belongs to the worker, not the request that queues it.
+        # A crash at either side of task creation leaves recoverable pending work.
+        v = await store.claim_refinement_render(v["id"])
+        if not v:
+            return
+        render_claim_id = v["grounding"]["_refinement"]["render_claim_id"]
+    worker_store = store
     prompts = v.get("image_prompts") or []
     urls: list[str | None] = [None] * len(prompts)
+
+    async def persist(fields: dict):
+        if render_claim_id:
+            return await worker_store.update_refinement_images(v["id"], render_claim_id, fields)
+        return await worker_store.update_venture(v["id"], fields)
 
     async def one(i: int, prompt: str):
         async with IMAGE_CONCURRENCY:
             try:
                 png = await llm.generate_render(prompt, v.get("accent") or "#e8eeff")
                 if png:
-                    urls[i] = await store.save_render(v["id"], i, png)
+                    if render_claim_id:
+                        urls[i] = await worker_store.save_render(
+                            v["id"], i, png, render_claim_id=render_claim_id,
+                        )
+                    else:
+                        urls[i] = await worker_store.save_render(v["id"], i, png)
                     # progressive: write each image as it lands
-                    await store.update_venture(v["id"], {"images": urls})
+                    await persist({"images": urls})
             except Exception as e:  # noqa: BLE001
                 print(f"[render] {v['slug']} #{i} failed: {e}")
 
-    await asyncio.gather(*(one(i, p) for i, p in enumerate(prompts)))
+    try:
+        # Includes concurrency queueing and storage writes; finish before lease expiry.
+        async with asyncio.timeout(RENDER_LEASE_SECONDS - 30):
+            await asyncio.gather(*(one(i, p) for i, p in enumerate(prompts)))
+    except TimeoutError:
+        print(f"[render] {v['slug']} timed out")
     status = "ready" if any(urls) else "failed"
-    await store.update_venture(v["id"], {"images": urls, "images_status": status})
+    await persist({"images": urls, "images_status": status})
 
 
 def _owns_completed_refinement(v: dict | None, claim_id: str) -> bool:
@@ -555,6 +580,15 @@ async def _load(slug: str, request: Request) -> tuple[dict, bool]:
     is_owner = bool(token) and token == v["owner_token"]
     if v.get("visibility") != "public" and not is_owner:
         raise HTTPException(404, "This venture hasn't been released by its creator.")
+    v = await store.reconcile_venture(v)
+    marker = (v.get("grounding") or {}).get("_refinement") or {}
+    if (
+        marker.get("state") == "completed" and v.get("images_status") == "pending"
+        and (not marker.get("render_claim_id") or lease_expired(
+            marker, "render_lease_until", v.get("updated_at")
+        ))
+    ):
+        asyncio.create_task(_render_images(v))
     return v, is_owner
 
 
@@ -608,6 +642,7 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
         )
         if not claimed:
             raise HTTPException(409, "This venture is not available for refinement.")
+        v = claimed
         _record_hit(caller)
 
         buf = ""
@@ -704,6 +739,13 @@ def _normalize_path(data: dict, tier: int, tier_label: str) -> dict:
             "steps": steps}
 
 
+async def _bounded_path_text(v: dict, tier: int):
+    # Keep provider work shorter than the durable claim's five-minute lease.
+    async with asyncio.timeout(120):
+        async for chunk in llm.stream_path_text(v, tier):
+            yield chunk
+
+
 @app.post("/api/ventures/{slug}/path")
 async def choose_path(slug: str, body: PathBody, request: Request):
     """Owner picks one of the three tiers. The engine streams a step-by-step guide for it."""
@@ -735,7 +777,7 @@ async def choose_path(slug: str, body: PathBody, request: Request):
         last_emit, last_key = 0.0, None
         finished = False
         try:
-            async for chunk in llm.stream_path_text(v, tier):
+            async for chunk in _bounded_path_text(v, tier):
                 buf += chunk
                 now = time.time()
                 obj, key = parse_partial(buf)
