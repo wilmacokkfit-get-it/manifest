@@ -99,7 +99,9 @@ Want Claude writing the text instead? Add `ANTHROPIC_API_KEY`, set `LLM_PROVIDER
 
 ## Supabase
 
-The three v1 tables (`ventures`, `signals`, `waitlist`) and the public `renders` storage bucket are already created in your Manifest project. Row Level Security is on and there are no anon policies, so only the server (using the service role key) can read or write.
+The schema creates the venture tables and a private `renders` storage bucket. Row Level Security is on and there are no anon policies, so only the server (using its backend secret key) can read or write. Images are delivered through the app: private images require the creator's cookie; released images remain visible to everyone.
+
+At startup the Supabase backend makes its configured renders bucket private and verifies the setting, failing startup if that cannot be done. Re-running `supabase/migration.sql` also makes the default bucket private. Neither action moves or deletes objects or rewrites venture records. Existing stored public image references are translated to app URLs when displayed. Do not add browser-readable Storage policies for this bucket. Copies previously downloaded or cached while the bucket was public cannot be recalled; disabling public access prevents new origin downloads but may not immediately purge old CDN caches.
 
 **v2 needs one more run.** The Path layer adds a `path` column on `ventures` and two tables, `needs` and `offers`. The Supabase connection timed out when I tried to apply it, so do this once, about a minute:
 

@@ -29,3 +29,7 @@ Use `SUPABASE_URL` and `SUPABASE_SECRET_KEY` in Secrets. Legacy `SUPABASE_SERVIC
 Run the full `supabase/migration.sql` in Supabase's SQL Editor, including its final grants to `service_role`. RLS bypass does not replace SQL table privileges. Database read/write access and image upload/retrieval have been verified with temporary records that were removed after verification.
 
 `STORE=sqlite` keeps local data in use even when Supabase secrets exist. Set `STORE=supabase` after verifying the database permissions; missing secrets fail explicitly. The default `STORE=auto` selects Supabase when its settings exist, otherwise SQLite. Switching backends does not migrate or delete existing SQLite ventures or images.
+
+## Image privacy
+
+Render delivery checks venture visibility and the creator cookie on every request, including legacy local `/renders/` URLs. Supabase startup updates the configured bucket to private in place and verifies it before serving; failure stops startup. Run the migration to create the bucket on new installations. Existing images and stored references are retained; views translate legacy Supabase public URLs to protected app URLs. Do not grant browser roles read access to render objects. Previously downloaded images or old public CDN caches cannot be recalled by the app.

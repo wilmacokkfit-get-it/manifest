@@ -63,7 +63,28 @@ def _new_id() -> str:
 # SQLite
 # ---------------------------------------------------------------------------
 
-class SQLiteStore:
+class RenderAccess:
+    """Translate stored references without changing existing records or objects."""
+
+    def _legacy_render_url(self, venture_id: str, idx: int, ext: str) -> str:
+        raise NotImplementedError
+
+    def render_url(self, venture: dict, idx: int) -> str | None:
+        images = venture.get("images") or []
+        if idx < 0 or idx >= len(images) or not images[idx]:
+            return None
+        venture_id = venture["id"]
+        if not re.fullmatch(r"[a-zA-Z0-9-]+", venture_id):
+            return None
+        for ext in ("png", "webp"):
+            guarded = f"/api/venture-images/{venture_id}/{idx}.{ext}"
+            if images[idx] in (guarded, self._legacy_render_url(venture_id, idx, ext)):
+                return guarded
+        # Never fetch an arbitrary URL from a stored record.
+        return None
+
+
+class SQLiteStore(RenderAccess):
     kind = "sqlite"
 
     def __init__(self, data_dir: str | Path):
@@ -326,6 +347,22 @@ class SQLiteStore:
         return [dict(r) for r in rows]
 
     # -- renders ------------------------------------------------------------
+    def _legacy_render_url(self, venture_id: str, idx: int, ext: str) -> str:
+        return f"/renders/{venture_id}-{idx}.{ext}"
+
+    async def read_render(self, venture: dict, idx: int) -> tuple[bytes, str] | None:
+        url = self.render_url(venture, idx)
+        if not url:
+            return None
+        ext = url.rsplit(".", 1)[1]
+        path = self.renders_dir / f"{venture['id']}-{idx}.{ext}"
+        if path.resolve().parent != self.renders_dir.resolve():
+            return None
+        try:
+            return await asyncio.to_thread(path.read_bytes), f"image/{ext}"
+        except FileNotFoundError:
+            return None
+
     async def save_render(self, venture_id: str, idx: int, png: bytes) -> str:
         data, ext, _ = await asyncio.to_thread(compress_render, png)
         path = self.renders_dir / f"{venture_id}-{idx}.{ext}"
@@ -337,7 +374,7 @@ class SQLiteStore:
 # Supabase (PostgREST + Storage)
 # ---------------------------------------------------------------------------
 
-class SupabaseStore:
+class SupabaseStore(RenderAccess):
     kind = "supabase"
 
     def __init__(self, url: str, service_key: str, bucket: str = "renders"):
@@ -364,6 +401,20 @@ class SupabaseStore:
             timeout=30,
         )
         self._slug_cache: set[str] = set()
+
+    async def initialize(self) -> None:
+        """Close old public URLs in place; never delete objects or records.
+
+        Do not serve the app if storage privacy cannot be established.
+        """
+        r = await self._client.put(
+            f"/storage/v1/bucket/{self.bucket}", json={"public": False},
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"Could not make renders bucket private: {r.status_code}")
+        r = await self._client.get(f"/storage/v1/bucket/{self.bucket}")
+        if r.status_code >= 400 or r.json().get("public") is not False:
+            raise RuntimeError("Could not verify renders bucket is private.")
 
     async def _rest(self, method: str, table: str, *, params: dict | None = None, json_body: Any = None,
                     prefer: str | None = None) -> Any:
@@ -519,17 +570,34 @@ class SupabaseStore:
     async def list_offers(self, need_id: str) -> list[dict]:
         return await self._rest("GET", "offers", params={"need_id": f"eq.{need_id}", "order": "created_at.asc"}) or []
 
+    def _legacy_render_url(self, venture_id: str, idx: int, ext: str) -> str:
+        return f"{self.url}/storage/v1/object/public/{self.bucket}/{venture_id}/{idx}.{ext}"
+
+    async def read_render(self, venture: dict, idx: int) -> tuple[bytes, str] | None:
+        url = self.render_url(venture, idx)
+        if not url:
+            return None
+        ext = url.rsplit(".", 1)[1]
+        r = await self._client.get(
+            f"/storage/v1/object/authenticated/{self.bucket}/{venture['id']}/{idx}.{ext}",
+        )
+        if r.status_code == 404:
+            return None
+        if r.status_code >= 400:
+            raise RuntimeError(f"Storage download failed: {r.status_code}")
+        return r.content, f"image/{ext}"
+
     async def save_render(self, venture_id: str, idx: int, png: bytes) -> str:
         data, ext, mime = await asyncio.to_thread(compress_render, png)
         path = f"{venture_id}/{idx}.{ext}"
         r = await self._client.post(
             f"/storage/v1/object/{self.bucket}/{path}",
             content=data,
-            headers={"Content-Type": mime, "x-upsert": "true"},
+            headers={"Content-Type": mime, "x-upsert": "true", "cache-control": "0"},
         )
         if r.status_code >= 400:
             raise RuntimeError(f"Storage upload failed: {r.status_code} {r.text[:200]}")
-        return f"{self.url}/storage/v1/object/public/{self.bucket}/{path}"
+        return f"/api/venture-images/{venture_id}/{idx}.{ext}"
 
 
 # ---------------------------------------------------------------------------

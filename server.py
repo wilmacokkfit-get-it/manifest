@@ -13,10 +13,11 @@ import re
 import time
 import random
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -88,7 +89,16 @@ from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
 from app.store import build_store, day_start_iso, hours_ago_iso  # noqa: E402
 
 store = build_store()
-app = FastAPI(title="MANIFEST", docs_url=None, redoc_url=None)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    if store.kind == "supabase":
+        await store.initialize()
+    yield
+
+
+app = FastAPI(title="MANIFEST", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 PUBLIC = ROOT / "public"
 _index_cache: dict = {"mtime": 0.0, "html": ""}
@@ -182,6 +192,10 @@ async def _identity_cookie(request: Request, call_next):
 # Shaping
 # ---------------------------------------------------------------------------
 
+def _image_urls(v: dict) -> list:
+    return [store.render_url(v, i) for i in range(len(v.get("images") or []))]
+
+
 def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: list | None = None) -> dict:
     counts = counts or {
         "buy": v.get("buy_count", 0), "build": v.get("build_count", 0), "fund": v.get("fund_count", 0),
@@ -198,7 +212,7 @@ def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: 
         "tiers": v.get("tiers") or [],
         "roadmap": v.get("roadmap") or [],
         "grounding": v.get("grounding") or {},
-        "images": v.get("images") or [],
+        "images": _image_urls(v),
         "render_count": len(v.get("image_prompts") or []),
         "images_status": v.get("images_status", "pending"),
         "visibility": v.get("visibility", "private"),
@@ -238,7 +252,7 @@ def _path_view(path: dict | None, is_owner: bool) -> dict | None:
 def _card_view(v: dict) -> dict:
     return {
         "slug": v["slug"], "name": v.get("name"), "tagline": v.get("tagline"), "category": v.get("category"),
-        "accent": v.get("accent") or "#e8eeff", "image": (v.get("images") or [None])[0],
+        "accent": v.get("accent") or "#e8eeff", "image": (_image_urls(v) or [None])[0],
         "signals": {"buy": v.get("buy_count", 0), "build": v.get("build_count", 0), "fund": v.get("fund_count", 0),
                     "total": v.get("signal_count", 0)},
         "marked": bool(v.get("promoted_at")), "released_at": v.get("released_at"),
@@ -374,6 +388,36 @@ async def _render_images(v: dict) -> None:
 # ---------------------------------------------------------------------------
 # Ventures
 # ---------------------------------------------------------------------------
+
+async def _deliver_render(venture_id: str, idx: int, ext: str, request: Request):
+    headers = {"Cache-Control": "private, no-store", "Vary": "Cookie, X-Visitor-Id",
+               "X-Content-Type-Options": "nosniff"}
+    v = await store.get_by_id(venture_id)
+    expected = f"/api/venture-images/{venture_id}/{idx}.{ext}"
+    if (not v or (v.get("visibility") != "public" and _owner_token(request) != v["owner_token"])
+            or store.render_url(v, idx) != expected):
+        return JSONResponse({"error": "Image not found."}, status_code=404, headers=headers)
+    image = await store.read_render(v, idx)
+    if image is None:
+        return JSONResponse({"error": "Image not found."}, status_code=404, headers=headers)
+    data, mime = image
+    return Response(data, media_type=mime, headers=headers)
+
+
+@app.get("/api/venture-images/{venture_id}/{idx}.{ext}")
+async def venture_image(venture_id: str, idx: int, ext: str, request: Request):
+    return await _deliver_render(venture_id, idx, ext, request)
+
+
+@app.get("/renders/{filename:path}")
+async def legacy_render(filename: str, request: Request):
+    # Protect already-issued SQLite URLs too, including on Supabase deployments.
+    match = re.fullmatch(r"([a-zA-Z0-9-]+)-(\d+)\.(png|webp)", filename)
+    if store.kind != "sqlite" or not match:
+        return JSONResponse({"error": "Image not found."}, status_code=404,
+                            headers={"Cache-Control": "private, no-store"})
+    return await _deliver_render(match[1], int(match[2]), match[3], request)
+
 
 async def _load(slug: str, request: Request) -> tuple[dict, bool]:
     v = await store.get_by_slug(slug)
@@ -693,7 +737,7 @@ async def venture_page(slug: str, request: Request):
     v = await store.get_by_slug(slug)
     og = None
     if v and v.get("visibility") == "public":
-        first = next((u for u in (v.get("images") or []) if u), None)
+        first = next((u for u in _image_urls(v) if u), None)
         if first and first.startswith("/"):
             first = f"{PUBLIC_URL}{first}"
         og = {
@@ -705,10 +749,6 @@ async def venture_page(slug: str, request: Request):
     return _shell(og)
 
 
-DATA_DIR = Path(os.environ.get("MANIFEST_DATA_DIR", ROOT / "data"))
-if (DATA_DIR / "renders").exists() or store.kind == "sqlite":
-    (DATA_DIR / "renders").mkdir(parents=True, exist_ok=True)
-    app.mount("/renders", StaticFiles(directory=DATA_DIR / "renders"), name="renders")
 app.mount("/", StaticFiles(directory=PUBLIC, html=False), name="public")
 
 

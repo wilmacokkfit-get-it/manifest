@@ -62,10 +62,11 @@ alter table public.ventures enable row level security;
 alter table public.signals  enable row level security;
 alter table public.waitlist enable row level security;
 
--- Public bucket for product renders (URLs are shown on public venture pages).
+-- All renders use owner-checked app delivery, including released ventures.
+-- Update only bucket visibility: existing objects and venture records stay intact.
 insert into storage.buckets (id, name, public)
-values ('renders', 'renders', true)
-on conflict (id) do nothing;
+values ('renders', 'renders', false)
+on conflict (id) do update set public = false;
 
 
 -- v2: the Path (chosen tier + step-by-step guide), asks (needs) and offers
