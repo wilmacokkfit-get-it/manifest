@@ -396,22 +396,24 @@
       });
       root.classList.toggle('refining', busy);
       root.setAttribute('aria-busy', String(busy));
-      if (!state || state === 'unavailable' || state === 'skipped') {
+      const unlimited = v.refinement?.unlimited === true;
+      if (!state || state === 'unavailable' || (state === 'skipped' && !unlimited)) {
         refinement.classList.add('hidden');
         refinementState = state;
         return;
       }
       show(refinement);
-      const displayState = `${state}:${busy}`;
+      const waiting = state === 'waiting' || (unlimited && v.images_status === 'pending' && state !== 'pending');
+      const displayState = `${state}:${busy}:${unlimited}:${waiting}:${v.refinement?.context || ''}`;
       if (refinementState === displayState) return;
       refinementState = displayState;
       refinement.replaceChildren();
-      if (state === 'completed') {
+      if (state === 'completed' && !unlimited) {
         refinement.append(h('p', { class: 'refinement-done', text: 'Your context has been applied. This is your final result.' }));
         return;
       }
-      const label = h('label', { for: 'refinement-context', text: 'Anything the first result missed?' });
-      const help = h('p', { class: 'refinement-help', id: 'refinement-help', text: 'Add a little more context or a correction. You get one refinement, not an ongoing chat.' });
+      const label = h('label', { for: 'refinement-context', text: unlimited ? 'What would you like to refine?' : 'Anything the first result missed?' });
+      const help = h('p', { class: 'refinement-help', id: 'refinement-help', text: unlimited ? 'Owner access: refine this private result as often as you need. Wait for each update and its renders to finish.' : 'Add a little more context or a correction. You get one refinement, not an ongoing chat.' });
       const input = h('textarea', {
         id: 'refinement-context', name: 'context', rows: '3', maxlength: '1000',
         placeholder: 'For example: this is for renters, and it needs to cost under $50.',
@@ -420,9 +422,8 @@
       });
       input.value = refinementDraft || v.refinement?.context || '';
       const note = h('p', { class: 'refinement-note', id: 'refinement-status', role: 'status', 'aria-live': 'polite' });
-      const submit = h('button', { class: 'btn primary', type: 'submit', text: busy ? 'Applying your context…' : 'Refine once →' });
+      const submit = h('button', { class: 'btn primary', type: 'submit', text: busy ? 'Applying your context…' : unlimited ? 'Refine →' : 'Refine once →' });
       const skip = h('button', { class: 'btn ghost', type: 'button', text: 'Keep this result' });
-      const waiting = state === 'waiting';
       input.disabled = busy;
       submit.disabled = busy || waiting;
       skip.disabled = busy;
@@ -453,7 +454,7 @@
           refinementBusy = false;
           refinementDraft = '';
           complete(fresh);
-          toast('Your one refinement is complete.');
+          toast(unlimited ? 'Your refinement is complete.' : 'Your one refinement is complete.');
         } catch (error) { await recover(error); }
       } }, label, help, input, h('div', { class: 'refinement-buttons' }, submit, skip), note);
       skip.addEventListener('click', async () => {

@@ -12,3 +12,5 @@ openai>=1.50
 pillow>=10.0
 pydantic>=2.7
 uvicorn[standard]>=0.30
+anyio
+PyJWT[crypto]>=2.10,<3

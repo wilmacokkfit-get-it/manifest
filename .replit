@@ -4,7 +4,7 @@ modules = ["python-3.11", "nodejs-24"]
 
 [nix]
 channel = "stable-24_05"
-packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "tcl", "tk", "zlib", "postgresql"]
+packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "postgresql", "tcl", "tk", "zlib"]
 
 [deployment]
 run = ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "5000"]
@@ -22,6 +22,9 @@ IMAGE_PROVIDER = "openai"
 LLM_MODEL = "gpt-5-mini"
 LLM_PROVIDER = "openai"
 STORE = "supabase"
+
+[userenv.production]
+NODE_ENV = "production"
 
 [workflows]
 runButton = "Project"

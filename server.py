@@ -88,6 +88,7 @@ from app import llm  # noqa: E402
 from app.partial_json import parse_partial  # noqa: E402
 from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
 from app.store import RENDER_LEASE_SECONDS, build_store, day_start_iso, hours_ago_iso, lease_expired  # noqa: E402
+from app.owner_auth import app_owner_token, is_app_owner, router as owner_auth_router  # noqa: E402
 
 store = build_store()
 
@@ -100,6 +101,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="MANIFEST", docs_url=None, redoc_url=None, lifespan=lifespan)
+app.include_router(owner_auth_router)
 
 PUBLIC = ROOT / "public"
 _index_cache: dict = {"mtime": 0.0, "html": ""}
@@ -193,9 +195,20 @@ def _owner_token(request: Request) -> str:
     """Who is this? Prefer the hosting proxy's stable visitor id, then our own
     first-party cookie (set by the middleware below), never anything the page
     can forge from JavaScript."""
+    authenticated_token = getattr(request.state, "app_owner_token", None)
+    if authenticated_token:
+        return authenticated_token
     if TRUST_VISITOR_HEADER and request.headers.get("x-visitor-id"):
         return request.headers["x-visitor-id"]
     return request.state.owner
+
+
+def _is_creator(request: Request, venture: dict) -> bool:
+    """An owner account also keeps access to its pre-login browser's ventures."""
+    tokens = {_owner_token(request), getattr(request.state, "owner", None)}
+    if TRUST_VISITOR_HEADER:
+        tokens.add(request.headers.get("x-visitor-id"))
+    return bool(venture.get("owner_token")) and venture["owner_token"] in tokens
 
 
 @app.middleware("http")
@@ -206,6 +219,8 @@ async def _identity_cookie(request: Request, call_next):
     if not token or len(token) < 16:
         token, fresh = new_token(), True
     request.state.owner = token
+    if request.url.path.startswith(("/api/manifest", "/api/ventures/", "/api/venture-images/", "/renders/")):
+        request.state.app_owner_token = await app_owner_token(request)
     response = await call_next(request)
     if fresh and not (TRUST_VISITOR_HEADER and request.headers.get("x-visitor-id")):
         response.set_cookie(COOKIE, token, max_age=60 * 60 * 24 * 365 * 2, httponly=True,
@@ -221,7 +236,8 @@ def _image_urls(v: dict) -> list:
     return [store.render_url(v, i) for i in range(len(v.get("images") or []))]
 
 
-def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: list | None = None) -> dict:
+def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: list | None = None,
+                 unlimited: bool = False) -> dict:
     counts = counts or {
         "buy": v.get("buy_count", 0), "build": v.get("build_count", 0), "fund": v.get("fund_count", 0),
         "total": v.get("signal_count", 0), "avg_price": None,
@@ -252,6 +268,11 @@ def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: 
             }
         else:
             refinement = {"state": "unavailable"}
+        if (
+            unlimited and v.get("visibility") == "private" and v.get("path") is None
+            and v.get("status") in ("ready", "refining")
+        ):
+            refinement["unlimited"] = True
     return {
         "id": v["id"],
         "slug": v["slug"],
@@ -408,9 +429,11 @@ class ManifestBody(BaseModel):
 async def manifest(body: ManifestBody, request: Request):
     idea = " ".join(body.idea.split())
     caller = _caller_id(request)
-    _check_rate(caller)
-    if await store.count_generations_since(day_start_iso()) >= GLOBAL_PER_DAY:
-        raise HTTPException(429, "The engine has reached today's capacity. It resets at midnight UTC.")
+    unlimited = await is_app_owner(request)
+    if not unlimited:
+        _check_rate(caller)
+        if await store.count_generations_since(day_start_iso()) >= GLOBAL_PER_DAY:
+            raise HTTPException(429, "The engine has reached today's capacity. It resets at midnight UTC.")
     owner = _owner_token(request)
     created_at = now_iso()
     prov = mint(idea, created_at, owner)
@@ -443,10 +466,11 @@ async def manifest(body: ManifestBody, request: Request):
                 "visibility": "private", "status": "ready",
             }
             saved = await store.create_venture(row)
-            _record_hit(caller)  # only successful births count against the limit
+            if not unlimited:
+                _record_hit(caller)  # only successful visitor births count against the limit
             if saved["images_status"] == "pending":
                 asyncio.create_task(_render_images(saved))
-            yield _sse("done", _public_view(saved, is_owner=True))
+            yield _sse("done", _public_view(saved, is_owner=True, unlimited=unlimited))
         except HTTPException as e:
             yield _sse("error", {"message": e.detail})
         except Exception as e:  # noqa: BLE001
@@ -547,7 +571,7 @@ async def _deliver_render(venture_id: str, idx: int, ext: str, request: Request)
                "X-Content-Type-Options": "nosniff"}
     v = await store.get_by_id(venture_id)
     expected = f"/api/venture-images/{venture_id}/{idx}.{ext}"
-    if (not v or (v.get("visibility") != "public" and _owner_token(request) != v["owner_token"])
+    if (not v or (v.get("visibility") != "public" and not _is_creator(request, v))
             or store.render_url(v, idx) != expected):
         return JSONResponse({"error": "Image not found."}, status_code=404, headers=headers)
     image = await store.read_render(v, idx)
@@ -576,8 +600,7 @@ async def _load(slug: str, request: Request) -> tuple[dict, bool]:
     v = await store.get_by_slug(slug)
     if not v:
         raise HTTPException(404, "No venture lives at this address.")
-    token = _owner_token(request)
-    is_owner = bool(token) and token == v["owner_token"]
+    is_owner = _is_creator(request, v)
     if v.get("visibility") != "public" and not is_owner:
         raise HTTPException(404, "This venture hasn't been released by its creator.")
     v = await store.reconcile_venture(v)
@@ -605,15 +628,17 @@ async def _needs_view(v: dict, is_owner: bool) -> list[dict]:
     return out
 
 
-async def _full_view(v: dict, is_owner: bool) -> dict:
+async def _full_view(v: dict, is_owner: bool, request: Request | None = None) -> dict:
     counts = await store.signal_counts(v["id"])
-    return _public_view(v, is_owner=is_owner, counts=counts, needs=await _needs_view(v, is_owner))
+    unlimited = bool(is_owner and request is not None and await is_app_owner(request))
+    return _public_view(v, is_owner=is_owner, counts=counts, needs=await _needs_view(v, is_owner),
+                        unlimited=unlimited)
 
 
 @app.get("/api/ventures/{slug}")
 async def get_venture(slug: str, request: Request):
     v, is_owner = await _load(slug, request)
-    return await _full_view(v, is_owner)
+    return await _full_view(v, is_owner, request)
 
 
 class RefinementBody(BaseModel):
@@ -629,7 +654,9 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
     if not context or len(context) > 1000:
         raise HTTPException(400, "Context must be between 1 and 1000 characters.")
     caller = _caller_id(request)
-    _check_rate(caller)
+    unlimited = await is_app_owner(request)
+    if not unlimited:
+        _check_rate(caller)
     original_grounding = dict(v.get("grounding") or {})
     claim_id = new_token()
     completed = False
@@ -638,12 +665,14 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
         # cancelled or the network drops its response. Keep acquisition shielded,
         # then always attempt a token-scoped cleanup in the finally block.
         claimed = await _shielded_bounded_call(
-            store.claim_refinement(v["id"], context, require_images_finished=True, claim_id=claim_id)
+            store.claim_refinement(v["id"], context, require_images_finished=True,
+                                   claim_id=claim_id, allow_repeat=unlimited)
         )
         if not claimed:
             raise HTTPException(409, "This venture is not available for refinement.")
         v = claimed
-        _record_hit(caller)
+        if not unlimited:
+            _record_hit(caller)
 
         buf = ""
         with anyio.fail_after(120):
@@ -677,7 +706,7 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
             timeout=65,
         )
         completed = True
-        return await _full_view(saved, True)
+        return await _full_view(saved, True, request)
     except asyncio.CancelledError:
         raise
     except HTTPException:
@@ -699,14 +728,16 @@ async def skip_refinement(slug: str, request: Request):
     v, is_owner = await _load(slug, request)
     if not is_owner:
         raise HTTPException(403, "Only the creator can skip refinement.")
-    saved = await store.claim_refinement(v["id"], skipped=True, require_images_finished=False)
+    saved = await store.claim_refinement(
+        v["id"], skipped=True, require_images_finished=False, allow_repeat=await is_app_owner(request)
+    )
     if not saved:
         fresh = await store.get_by_id(v["id"])
         marker = ((fresh or {}).get("grounding") or {}).get("_refinement", {})
         if marker.get("state") == "skipped":
-            return await _full_view(fresh, True)
+            return await _full_view(fresh, True, request)
         raise HTTPException(409, "This venture is not available to skip refinement.")
-    return await _full_view(saved, True)
+    return await _full_view(saved, True, request)
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +823,7 @@ async def choose_path(slug: str, body: PathBody, request: Request):
             if not saved:
                 raise RuntimeError("The path claim could not be completed.")
             finished = True
-            yield _sse("done", await _full_view(saved, True))
+            yield _sse("done", await _full_view(saved, True, request))
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -832,7 +863,7 @@ async def update_step(slug: str, n: int, body: StepBody, request: Request):
     if body.note is not None:
         step["note"] = body.note.strip()[:1500]
     saved = await store.update_venture(v["id"], {"path": path})
-    return await _full_view(saved, True)
+    return await _full_view(saved, True, request)
 
 
 @app.delete("/api/ventures/{slug}/path")
@@ -841,7 +872,7 @@ async def reset_path(slug: str, request: Request):
     if not is_owner:
         raise HTTPException(403, "Only the creator can reset the path.")
     saved = await store.reset_path(v["id"])
-    return await _full_view(saved, True)
+    return await _full_view(saved, True, request)
 
 
 class NeedBody(BaseModel):
@@ -861,7 +892,7 @@ async def create_need(slug: str, body: NeedBody, request: Request):
     if len(await store.list_needs(v["id"])) >= 12:
         raise HTTPException(429, "Twelve open asks is plenty. Close some first.")
     await store.create_need(v["id"], body.step_n, title, body.detail.strip()[:600])
-    return await _full_view(v, True)
+    return await _full_view(v, True, request)
 
 
 class NeedStatusBody(BaseModel):
@@ -879,7 +910,7 @@ async def update_need(slug: str, need_id: str, body: NeedStatusBody, request: Re
     if not n or n["venture_id"] != v["id"]:
         raise HTTPException(404, "No such ask.")
     await store.set_need_status(need_id, body.status)
-    return await _full_view(v, True)
+    return await _full_view(v, True, request)
 
 
 class OfferBody(BaseModel):
@@ -901,7 +932,7 @@ async def add_offer(slug: str, need_id: str, body: OfferBody, request: Request):
     if not _EMAIL.match(email):
         raise HTTPException(400, "That email doesn't look right.")
     added = await store.add_offer(need_id, email, body.name.strip()[:80], body.message.strip()[:600])
-    out = await _full_view(v, is_owner)
+    out = await _full_view(v, is_owner, request)
     out["added"] = added
     return out
 
@@ -920,7 +951,7 @@ async def release(slug: str, request: Request):
             raise HTTPException(409, "A venture cannot be released while it is being refined.")
     else:
         v = released
-    return await _full_view(v, True)
+    return await _full_view(v, True, request)
 
 
 class SignalBody(BaseModel):
@@ -952,7 +983,8 @@ async def signal(slug: str, body: SignalBody, request: Request):
     if not v.get("promoted_at") and (counts["total"] >= MARK_SIGNALS or counts["build"] + counts["fund"] >= MARK_BUILD_FUND):
         fields["promoted_at"] = now_iso()
     v = await store.update_venture(v["id"], fields)
-    out = _public_view(v, is_owner=is_owner, counts=counts, needs=await _needs_view(v, is_owner))
+    out = _public_view(v, is_owner=is_owner, counts=counts, needs=await _needs_view(v, is_owner),
+                       unlimited=bool(is_owner and await is_app_owner(request)))
     out["added"] = added
     return out
 

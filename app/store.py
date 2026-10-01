@@ -98,7 +98,11 @@ class RenderAccess:
         if status == "refining" and marker.get("state") == "pending":
             if not lease_expired(marker, "lease_until", venture.get("updated_at")):
                 return venture
-            grounding.pop("_refinement", None)
+            previous = marker.get("previous_refinement")
+            if isinstance(previous, dict) and previous.get("state") in ("completed", "skipped"):
+                grounding["_refinement"] = previous
+            else:
+                grounding.pop("_refinement", None)
         elif status == "planning":
             if not lease_expired(marker, "path_lease_until", venture.get("updated_at")):
                 return venture
@@ -307,28 +311,60 @@ class SQLiteStore(RenderAccess):
     async def claim_refinement(
         self, venture_id: str, context: str | None = None, *, skipped: bool = False,
         require_images_finished: bool = True, claim_id: str | None = None,
+        allow_repeat: bool = False,
     ) -> dict | None:
         """Atomically consume the one refinement opportunity (or mark it skipped)."""
-        marker = {"state": "skipped"} if skipped else {
-            "state": "pending", "context": context, "claim_id": claim_id or _new_id(),
-            "lease_until": lease_until(),
-        }
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute("SELECT * FROM ventures WHERE id = ?", [venture_id]).fetchone()
             venture = self._row_to_dict(row)
-            eligible = bool(
+            raw_grounding = (venture or {}).get("grounding")
+            original_grounding = {} if raw_grounding is None else raw_grounding
+            grounding_is_object = isinstance(original_grounding, dict)
+            original_marker = original_grounding.get("_refinement") if grounding_is_object else None
+            repeated = bool(
+                allow_repeat and grounding_is_object and "_refinement" in original_grounding
+                and isinstance(original_marker, dict)
+                and original_marker.get("state") in ("completed", "skipped")
+            )
+            basic_eligibility = bool(
                 venture
                 and venture.get("status") == "ready"
                 and venture.get("visibility") == "private"
                 and venture.get("path") is None
-                and "_refinement" not in (venture.get("grounding") or {})
-                and (not require_images_finished or venture.get("images_status") != "pending")
+                and (
+                    not (require_images_finished or (allow_repeat and not skipped))
+                    or (
+                        venture.get("images_status") != "pending"
+                        and (not allow_repeat or venture.get("images_status") is not None)
+                    )
+                )
             )
+            if allow_repeat:
+                eligible = bool(
+                    basic_eligibility and grounding_is_object
+                    and ("_refinement" not in original_grounding or repeated)
+                )
+            else:
+                eligible = bool(
+                    basic_eligibility and "_refinement" not in (venture.get("grounding") or {})
+                )
             if not eligible:
                 self._db.rollback()
                 return None
-            grounding = dict(venture.get("grounding") or {})
+            if repeated and skipped:
+                if venture.get("images_status") == "pending":
+                    self._db.rollback()
+                    return None
+                self._db.commit()
+                return venture
+            grounding = dict(original_grounding if allow_repeat else (venture.get("grounding") or {}))
+            marker = {"state": "skipped"} if skipped else {
+                "state": "pending", "context": context, "claim_id": claim_id or _new_id(),
+                "lease_until": lease_until(),
+            }
+            if repeated and not skipped:
+                marker["previous_refinement"] = dict(original_marker)
             grounding["_refinement"] = marker
             claimed_status = "ready" if skipped else "refining"
             self._db.execute(
@@ -770,25 +806,67 @@ class SupabaseStore(RenderAccess):
     async def claim_refinement(
         self, venture_id: str, context: str | None = None, *, skipped: bool = False,
         require_images_finished: bool = True, claim_id: str | None = None,
+        allow_repeat: bool = False,
     ) -> dict | None:
         current = await self.get_by_id(venture_id)
         if not current:
             return None
-        grounding = dict(current.get("grounding") or {})
+        raw_grounding = current.get("grounding")
+        if allow_repeat:
+            if raw_grounding is not None and not isinstance(raw_grounding, dict):
+                return None
+            original_grounding = raw_grounding or {}
+        else:
+            original_grounding = dict(raw_grounding or {})
+        grounding = dict(original_grounding)
+        repeated = bool(
+            allow_repeat and "_refinement" in original_grounding
+            and isinstance(original_grounding.get("_refinement"), dict)
+            and original_grounding["_refinement"].get("state") in ("completed", "skipped")
+        )
+        if allow_repeat and "_refinement" in original_grounding and not repeated:
+            return None
+        if repeated and skipped:
+            if (
+                current.get("status") != "ready"
+                or current.get("visibility") != "private"
+                or current.get("path") is not None
+                or current.get("images_status") == "pending"
+                or (require_images_finished and current.get("images_status") is None)
+            ):
+                return None
+            return current
+        requires_finished_images = require_images_finished or (allow_repeat and not skipped)
+        if allow_repeat and requires_finished_images and (
+            current.get("images_status") is None or current.get("images_status") == "pending"
+        ):
+            return None
         grounding["_refinement"] = (
             {"state": "skipped"} if skipped else {
                 "state": "pending", "context": context, "claim_id": claim_id or _new_id(),
                 "lease_until": lease_until(),
             }
         )
+        if repeated and not skipped:
+            grounding["_refinement"]["previous_refinement"] = dict(original_grounding["_refinement"])
         params = {
             "id": f"eq.{venture_id}",
             "status": "eq.ready",
             "visibility": "eq.private",
             "path": "is.null",
-            "grounding->_refinement": "is.null",
         }
-        if require_images_finished:
+        if repeated:
+            # Repeats need compare-and-swap over the complete observed grounding:
+            # timestamp alone cannot fence a competing replacement attempt.
+            params.update(self._snapshot_params(current))
+            params.update({
+                "status": "eq.ready",
+                "visibility": "eq.private",
+                "path": "is.null",
+            })
+        else:
+            params["grounding->_refinement"] = "is.null"
+        if requires_finished_images and not repeated:
             params["images_status"] = "neq.pending"
         data = await self._rest(
             "PATCH", "ventures", params=params,
