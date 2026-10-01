@@ -14,3 +14,15 @@ Treat bucket privatization as a change that must be checked at the object endpoi
 **Why:** A disposable live check observed a brief readable public response after Supabase reported the bucket private. Private buckets also do not override permissive browser-role object policies.
 
 **How to apply:** Probe both an already warmed public URL and a cache-busted URL. Check browser roles separately from requests with no API key, report observed delay, and never promise that previously public images can be recalled.
+
+Privacy audits of shared Storage must not evaluate arbitrary policy helpers
+against existing user objects; leave uncertain expression semantics unresolved
+for an authorized operator.
+
+**Why:** A read-only transaction prevents writes, but it does not prevent
+privileged policy functions from reading private content. “Read-only” alone
+does not satisfy a no-existing-object-access audit boundary.
+
+**How to apply:** Inventory policy definitions and role grants from catalogs.
+Inspect helper definitions rather than invoke them on user objects, and use
+disposable fixtures only when the task permits them.

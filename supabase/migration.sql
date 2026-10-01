@@ -68,6 +68,10 @@ alter table public.waitlist enable row level security;
 -- storage.objects. Do not grant anon/authenticated browser reads to renders.
 -- Audit existing project policies separately; do not delete shared policies here.
 -- See docs/supabase-image-privacy.md for a disposable live check and CDN caveats.
+-- Generate the read-only configured-bucket audit with:
+--   python scripts/render_storage_policy_audit.py
+-- This migration's bucket literal is "renders"; if SUPABASE_RENDERS_BUCKET is
+-- customized, provision that bucket separately and audit the actual configuration.
 insert into storage.buckets (id, name, public)
 values ('renders', 'renders', false)
 on conflict (id) do update set public = false;

@@ -112,6 +112,114 @@ The disposable bucket catches project-wide browser-readable policies, but does
 not prove that bucket-specific policies on the application's existing renders
 bucket are safe. Audit those policies separately without changing user objects.
 
+## Read-only audit of the configured renders bucket
+
+Run this **in addition to**, not instead of, the disposable live tests. A policy
+such as `bucket_id = 'renders'` will not match their random fixture buckets.
+The app's `SupabaseStore.initialize()` verifies bucket visibility only; it cannot
+inspect PostgreSQL policies through the Storage API. A successful startup is
+not a policy-audit pass.
+
+### Generate and run the audit
+
+1. Confirm which Supabase project and runtime configuration you are auditing.
+   Development and production can use different projects or bucket names; audit
+   each independently. Use an operator account with permission to read the
+   project's SQL catalogs and bucket metadata. Backend Storage/PostgREST API
+   keys are **not** SQL-editor credentials.
+2. In the application's environment, generate the query:
+
+   ```sh
+   python scripts/render_storage_policy_audit.py
+   ```
+
+   This reads only `SUPABASE_RENDERS_BUCKET`, defaulting to `renders` only when
+   unset, exactly like the app. It does not read keys, import the app, connect,
+   initialize a bucket, or create fixtures. For a different runtime, explicitly
+   supply its non-secret bucket name:
+
+   ```sh
+   SUPABASE_RENDERS_BUCKET=my-private-renders python scripts/render_storage_policy_audit.py
+   ```
+
+   Empty/control-character bucket names fail explicitly. SQL literals are
+   escaped, including quotes and backslashes. The source
+   `supabase/storage-policy-audit.sql` is a template, not a migration; use the
+   generator rather than manually replacing its marker.
+3. Paste the generated SQL into **that project's** Supabase SQL editor and run
+   the whole script. It runs inside `BEGIN TRANSACTION READ ONLY` and ends with
+   `ROLLBACK`. It reads `storage.buckets` metadata for the exact configured ID
+   and PostgreSQL catalogs only. It never selects `storage.objects` rows,
+   downloads images, evaluates policy functions, or changes grants/policies.
+   If execution fails in a persistent SQL session, issue `ROLLBACK` to end the
+   failed transaction. Errors or unavailable access mean **NOT AUDITED**, not
+   “no policies found.”
+4. Save the returned `storage_privacy_audit` JSON securely with the project,
+   configured bucket, audit timestamp, operator, review outcome and rationale.
+   Policy expressions can contain project-sensitive literals; redact them
+   before sharing publicly. No object paths, owner tokens or render bytes are
+   needed for this review.
+
+### Interpret every grant and policy
+
+The report deliberately inventories **all** `storage.objects` SELECT and ALL
+policies. It does not filter expressions by bucket-name text: rules may be
+project-wide, use arrays, prefixes, `OR`, helper functions, subqueries or role
+inheritance without spelling the bucket name. Expressions are displayed,
+**never executed**, and the output always says `OPERATOR REVIEW REQUIRED`.
+
+| Report field | What to review |
+| --- | --- |
+| `bucket` | Must exist and have `public: false`. `null` means the configured bucket is missing or invisible to this operator; not a pass. Public buckets expose downloads regardless of object SELECT RLS. |
+| `objects_table` | Must exist with `rls_enabled: true`. Record its owner and `rls_forced`; table owners normally bypass RLS unless forced. |
+| `browser_roles` | Both `anon` and `authenticated` must exist. Records effective schema usage, table/column SELECT privileges, ownership, superuser and RLS bypass. Missing roles/null fields are incomplete evidence. A bypass or owner role with read privileges defeats normal RLS protection. |
+| `table_select_grants` | Lists explicit SELECT ACL entries, including `public` (all roles), `anon`, `authenticated` and custom roles. Effective inherited/public and column-only access is also reported under `browser_roles`. Table SELECT is common in Supabase and alone is not proof of exposure when RLS is enforced. |
+| `select_and_all_policies` | Record policy name, command, mode, all granted roles, effective browser roles, and full USING expression. `public` policies apply to both browser roles; inherited roles are included via `pg_has_role(..., 'USAGE')`. `ALL` authorizes SELECT too. |
+
+For each browser-applicable policy, determine whether its **USING** condition
+can match any render in this exact bucket, including legacy paths. For SELECT,
+`WITH CHECK` does not restrict reading. A missing USING expression on an
+applicable permissive policy is unconditional. Permissive policies combine
+with **OR**, then applicable restrictive policies combine with **AND**; a
+restrictive policy alone does not grant access. Do not assume one restrictive
+rule cancels every permissive rule without reviewing role applicability and
+the combined expressions.
+
+MANIFEST uses a creator cookie and backend Storage access, not Supabase Auth
+ownership for image delivery. An `authenticated` policy permitting “only the
+Storage owner” is not automatically equivalent to the app's creator check.
+For this app's backend-only bucket, prefer no browser-applicable permissive
+SELECT/ALL policy capable of matching renders. For policies scoped exclusively
+to other buckets, record why they cannot match the configured bucket.
+Inspect referenced helper-function definitions and dependent rules read-only
+when needed; if their behavior cannot be established, record **UNRESOLVED**.
+Do not run arbitrary helpers on existing object rows as an audit shortcut.
+
+An audit pass requires a private bucket, intact RLS, no browser bypass, and
+documented exclusion of the configured renders from every effective browser
+read path. Grants/policies may change: rerun after permission or bucket-config
+changes. This review does not prove immediate CDN revocation or cover already
+downloaded copies, privileged backend access, leaked signed URLs, or unrelated
+custom privileged endpoints.
+
+If a rule could expose renders, record it as **EXPOSURE RISK**, keep the privacy
+acceptance result incomplete, and have the project owner approve a narrowly
+scoped correction. Do not automatically drop shared policies, revoke shared
+grants, move objects, or probe existing image URLs. The migration deliberately
+does none of those things. Its literal bucket is `renders`; it does not provision
+custom `SUPABASE_RENDERS_BUCKET` names.
+
+### Current configured-bucket audit status
+
+2026-10-01: **NOT AUDITED**. Available backend and browser API keys support the
+disposable API tests but do not provide SQL-catalog access. No live
+`storage.objects` SELECT/ALL policy definitions or anon/authenticated/public
+SQL grants have been retrieved for the existing configured renders bucket.
+Therefore no claim is made that bucket-specific grants are absent or safe.
+The observations below cover only disposable buckets. An operator must run
+the read-only audit above and record actual grants, expressions and review
+outcome before treating configured-bucket policy protection as verified.
+
 ## Observations
 
 2026-10-01, focused modern-secret run against the configured Supabase project:
