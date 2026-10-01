@@ -102,6 +102,7 @@
     if (route === '/marketplace') { mount(FloorView(), '/marketplace'); return; }
     if (route === '/waitlist') { mount(WaitlistView(), '/waitlist'); return; }
     if (route === '/about') { mount(AboutView(), null); return; }
+    if (route === '/architect') { mount(ArchitectView(), '/architect'); return; }
     mount(NotFound('No page lives at this address.'), null);
   }
 
@@ -126,10 +127,17 @@
   ideaInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ideaForm.requestSubmit(); } });
   $('#cta-top').addEventListener('click', (e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); setTimeout(() => ideaInput.focus(), 500); });
 
+  let pendingSentence = null;   // set by "Manifest this" on a crossbreed; consumed when the orb shows
   function resetHero() {
     orbWrap.classList.remove('forming'); formingName.textContent = ''; formingStatus.textContent = '';
     heroError.textContent = ''; heroTag.style.opacity = '';
+    if (pendingSentence) {
+      ideaInput.value = pendingSentence; pendingSentence = null;
+      ideaInput.dispatchEvent(new Event('input'));
+      setTimeout(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); ideaInput.focus(); ideaInput.setSelectionRange(ideaInput.value.length, ideaInput.value.length); }, 80);
+    }
   }
+  function manifestSentence(sentence) { pendingSentence = sentence; go('/'); }
 
   ideaForm.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -259,6 +267,10 @@
 
     // the path (chosen tier, walked step by step)
     const path = h('div', { class: 'path hidden' });
+    // what the Architect sees about this venture from above
+    const archBox = h('div', { class: 'v-arch hidden' });
+    // crossbreed: splice this venture with another, or with a field from left
+    const cross = h('div', { class: 'cross hidden' });
 
     // grounding
     const gEls = {};
@@ -284,7 +296,7 @@
     // actions
     const actions = h('div', { class: 'v-actions hidden' });
 
-    root.append(halo, head, renders, tiers, path, roadmap, grounding, seal, owner, signals, actions);
+    root.append(halo, head, renders, tiers, path, roadmap, grounding, cross, archBox, seal, owner, signals, actions);
 
     let venture = null;   // full record once complete/loaded
     let pollTimer = null, pollStart = 0;
@@ -360,6 +372,72 @@
       renderActions(v);
       renderTierPicks(v);
       renderPath(v);
+      renderCross(v);
+      if (v.visibility === 'public' && !archLoaded) { archLoaded = true; loadArchitect(v); }
+    }
+
+    // ---- crossbreed ----
+    let crossBusy = false;
+    let floorList = null;
+    function renderCross(v) {
+      if (!v.is_owner) { cross.classList.add('hidden'); cross.replaceChildren(); return; }
+      const sp = v.splices;
+      const kids = [h('h2', { class: 'v-label', text: 'Crossbreed' }),
+        h('p', { class: 'cross-sub', text: 'Splice this with something it should not go with: another venture on the Floor, or a mechanism from a field that has nothing to do with it. The Architect steals one specific thing and grafts it on. Three hybrids, each with the reason it should fail and the reason it does not.' })];
+      const ctl = h('div', { class: 'cross-ctl' });
+      const run = async (body, label) => {
+        if (crossBusy) return; crossBusy = true;
+        ctl.querySelectorAll('button,select').forEach(b => b.disabled = true);
+        status.textContent = label; status.classList.add('caret');
+        try { complete(await api(vpath(v, '/crossbreed'), { method: 'POST', body: JSON.stringify(body) })); toast('Three hybrids. Pick the one that bothers you.'); }
+        catch (e) { toast(e.message); status.textContent = ''; status.classList.remove('caret'); ctl.querySelectorAll('button,select').forEach(b => b.disabled = false); }
+        crossBusy = false;
+      };
+      const status = h('p', { class: 'cross-status' });
+      const sel = h('select', { class: 'cross-sel', 'aria-label': 'Pick a venture from the Floor' }, h('option', { value: '', text: 'Pick a venture from the Floor…' }));
+      sel.addEventListener('focus', async () => {
+        if (floorList) return;
+        try { const d = await api('/api/marketplace'); floorList = [...d.marked, ...d.rising].filter(c => c.slug !== v.slug); floorList.forEach(c => sel.append(h('option', { value: c.slug, text: `${c.name} · ${c.tagline}` }))); } catch (_) {}
+      });
+      sel.addEventListener('change', () => { if (sel.value) run({ with_slug: sel.value }, `Splicing with ${sel.options[sel.selectedIndex].text.split(' · ')[0]}…`); });
+      ctl.append(
+        h('button', { class: 'btn small primary', text: 'Let the Architect pick', onclick: () => run({}, 'Reading the Floor for the best donor…') }),
+        h('button', { class: 'btn small', text: 'From left field', onclick: () => run({ lateral: true }, 'Pulling a mechanism from somewhere unrelated…') }),
+        sel);
+      kids.push(ctl, status);
+      if (sp && sp.splices && sp.splices.length) {
+        const d = sp.donor || {};
+        const donorEl = d.kind === 'venture'
+          ? h('p', { class: 'cross-donor' }, 'Donor: ', ventureChip({ slug: d.slug, name: d.name, accent: d.accent }), h('span', { class: 'when', text: ` · ${fmtDate(sp.generated_at, true)}` }))
+          : h('p', { class: 'cross-donor' }, 'Donor field: ', h('b', { text: d.name || '' }), h('span', { class: 'when', text: ` · ${fmtDate(sp.generated_at, true)}` }));
+        kids.push(donorEl, h('div', { class: 'splices' }, ...sp.splices.map(x => spliceEl(x))));
+        if ((sp.history || []).length) kids.push(h('p', { class: 'ground-note', text: `${sp.history.length} earlier crossbreed${sp.history.length === 1 ? '' : 's'} kept in your record.` }));
+      }
+      kids.push(h('p', { class: 'ground-note', text: 'Only you see these. "Manifest this" turns a hybrid into its own venture, sealed to you.' }));
+      cross.replaceChildren(...kids); show(cross);
+    }
+    function spliceEl(x) {
+      return h('article', { class: 'splice' },
+        h('h3', { class: 's-name', text: x.name }),
+        h('p', { class: 's-stole' }, h('b', { text: 'Stole' }), x.stole),
+        h('p', { class: 's-hybrid', text: x.hybrid }),
+        h('div', { class: 's-why' }, h('div', {}, h('b', { text: 'Why it shouldn’t work' }), x.why_not), h('div', {}, h('b', { text: 'Why it does' }), x.why_it_does)),
+        h('p', { class: 's-test' }, h('b', { text: 'First test' }), x.first_test),
+        h('div', { class: 's-foot' }, h('button', { class: 'btn small primary', text: 'Manifest this →', onclick: () => manifestSentence(x.sentence) }),
+          h('span', { class: 's-sentence', text: x.sentence })));
+    }
+    let archLoaded = false;
+    async function loadArchitect(v) {
+      try {
+        const d = await api('/api/architect');
+        const mine = (d.readings || []).filter(r => (r.slugs || []).includes(v.slug) || (r.ask_ids || []).some(id => (v.needs || []).some(n => n.id === id)));
+        if (!mine.length) { if (d.pending) setTimeout(() => { archLoaded = false; if (venture) { archLoaded = true; loadArchitect(venture); } }, 6000); return; }
+        archBox.replaceChildren(h('h2', { class: 'v-label', text: 'From the Architect' }),
+          h('p', { class: 'v-arch-sub', text: `Seen from above the whole Floor, not just this page. Read ${fmtDate(d.generated_at, true)}.` }),
+          h('div', { class: 'readings compact' }, ...mine.map(r => readingEl(r, d, { hideSlug: v.slug }))),
+          h('p', { class: 'ground-note' }, h('a', { href: href('/architect'), 'data-route': '/architect', text: 'See everything the Architect sees →' })));
+        show(archBox);
+      } catch (_) {}
     }
 
     function applyImages(v) {
@@ -725,6 +803,7 @@
   // ---------- floor ----------
   function FloorView() {
     const marked = h('div', { class: 'cards' }), rising = h('div', { class: 'cards' }), reqs = h('div', { class: 'reqs' });
+    const archStrip = h('a', { class: 'arch-strip hidden', href: href('/architect'), 'data-route': '/architect' });
     const root = h('section', { class: 'view floor' },
       h('div', { class: 'floor-head' }, h('div', { class: 'eyebrow', text: 'The Floor' }),
         h('h2', { text: 'Ventures that earned their place.' }),
@@ -732,6 +811,7 @@
       h('div', { class: 'floor-section' }, h('h3', { class: 'v-label', text: 'Marked' }), marked),
       h('div', { class: 'floor-section' }, h('h3', { class: 'v-label', text: 'Rising' }), rising),
       h('div', { class: 'floor-section' }, h('h3', { class: 'v-label', text: 'Open asks' }), reqs),
+      archStrip,
     );
     const req = (r) => {
       const el = h('a', { class: 'req', href: href(`/v/${r.venture.slug}`), 'data-route': `/v/${r.venture.slug}` },
@@ -756,12 +836,108 @@
         const data = await api('/api/marketplace');
         marked.replaceChildren(...(data.marked.length ? data.marked.map(card) : [h('p', { class: 'empty', text: 'No venture has earned the Mark yet. The first one will be remembered.' })]));
         rising.replaceChildren(...(data.rising.length ? data.rising.map(card) : [h('p', { class: 'empty' }, 'Nothing released yet — ', h('a', { href: href('/'), 'data-route': '/', text: 'manifest the first one' }), '.')]));
+        api('/api/architect').then(a => {
+          if (a.thin || !a.readings.length) return;
+          archStrip.replaceChildren(h('div', { class: 'eyebrow', text: 'The Architect' }), h('div', { class: 'as-title', text: a.readings[0].title }),
+            h('div', { class: 'as-sub', text: `${a.readings.length} reading${a.readings.length === 1 ? '' : 's'} across the Floor. See what no single page shows →` }));
+          archStrip.classList.remove('hidden');
+        }).catch(() => {});
         const rq = data.requests || [];
         reqs.replaceChildren(...(rq.length ? rq.map(req) : [h('p', { class: 'empty', text: 'No open asks right now. When a creator needs a shop, a part, or a person, it shows up here.' })]));
       } catch (_) {}
     };
     load(); timer = setInterval(load, 20000);
     root.cleanup = () => clearInterval(timer);
+    return root;
+  }
+
+  // ---------- the architect ----------
+  const KIND_LABEL = { convergence: 'Convergence', adjacency: 'Adjacency', pool: 'Pool it', echo: 'Echo', gap: 'Gap', stall: 'Stall' };
+  function ventureChip(v) {
+    const a = h('a', { class: 'vchip', href: href(`/v/${v.slug}`), 'data-route': `/v/${v.slug}` }, h('i'), v.name || v.slug);
+    a.style.setProperty('--accent', v.accent || '#e8eeff');
+    return a;
+  }
+  function readingEl(r, data, opts = {}) {
+    const el = h('article', { class: `reading kind-${r.kind}` },
+      h('div', { class: 'r-kind', text: KIND_LABEL[r.kind] || 'Reading' }),
+      h('h3', { class: 'r-title', text: r.title }),
+      h('p', { class: 'r-insight', text: r.insight }),
+      r.action ? h('p', { class: 'r-action' }, h('b', { text: 'Tomorrow' }), r.action) : null);
+    const chips = h('div', { class: 'r-evidence' });
+    (r.slugs || []).forEach(s => { const v = data.ventures[s]; if (v && s !== opts.hideSlug) chips.append(ventureChip(v)); });
+    (r.ask_ids || []).forEach(id => { const a = data.asks[id]; if (a) chips.append(h('a', { class: 'vchip ask', href: href(`/v/${a.venture.slug}`), 'data-route': `/v/${a.venture.slug}` }, h('i'), `Ask: ${a.title}`)); });
+    if (chips.children.length) el.append(chips);
+    return el;
+  }
+  function ArchitectView() {
+    const counts = h('p', { class: 'arch-counts' });
+    const status = h('p', { class: 'arch-status' });
+    const list = h('div', { class: 'readings' });
+    const crossSec = h('div', { class: 'arch-cross hidden' });
+    const facts = h('div', { class: 'arch-facts hidden' });
+    const root = h('section', { class: 'view architect' },
+      h('div', { class: 'floor-head' }, h('div', { class: 'eyebrow', text: 'The Architect' }),
+        h('h2', { text: 'What the Floor looks like from above.' }),
+        h('p', { class: 'lead', text: 'Every creator sees their own venture. The Architect reads all of them at once: whose paths call for the same shop, whose buyers overlap, which asks one supplier could fill together, where the real signals are landing, and what is stalled.' }),
+        counts, status),
+      list, crossSec, facts);
+    let timer = null;
+    const fmtWhen = (iso) => iso ? fmtDate(iso, true) : '';
+    const load = async () => {
+      try {
+        const d = await api('/api/architect');
+        const c = d.counts;
+        counts.replaceChildren(h('b', { text: String(c.ventures) }), ` venture${c.ventures === 1 ? '' : 's'} · `, h('b', { text: String(c.with_paths) }), ` on a path · `, h('b', { text: String(c.open_asks) }), ` open ask${c.open_asks === 1 ? '' : 's'} · `, h('b', { text: String(c.hands) }), ` hand${c.hands === 1 ? '' : 's'} raised · `, h('b', { text: String(c.signals) }), ` signal${c.signals === 1 ? '' : 's'}`);
+        if (d.thin) {
+          status.textContent = 'Not enough on the Floor to see a pattern yet. Patterns need at least two released ventures, or one open ask.';
+          list.replaceChildren(h('p', { class: 'empty' }, 'Release a venture, pick a path, post an ask. The Architect starts seeing things when there are things to see. ', h('a', { href: href('/'), 'data-route': '/', text: 'Manifest one' }), '.'));
+          facts.classList.add('hidden');
+          return;
+        }
+        status.textContent = d.pending
+          ? (d.readings.length ? `The Floor changed. The Architect is re-reading it… showing the last reading from ${fmtWhen(d.generated_at)}.` : 'The Architect is reading the Floor…')
+          : `Read ${fmtWhen(d.generated_at)}. Counts are real rows. The prose is the engine’s. Verify before you act.`;
+        status.classList.toggle('caret', !!d.pending);
+        if (d.readings.length) list.replaceChildren(...d.readings.map(r => readingEl(r, d)));
+        else if (!d.pending) list.replaceChildren(h('p', { class: 'empty', text: 'The Architect looked and found nothing worth saying yet. That is an honest answer.' }));
+        renderCrosses(d);
+        renderFacts(d);
+        if (d.pending) { clearTimeout(timer); timer = setTimeout(load, 4000); }
+      } catch (e) { status.textContent = e.message; }
+    };
+    function renderCrosses(d) {
+      const cs = d.crossbreeds || [];
+      if (!cs.length) { crossSec.classList.add('hidden'); return; }
+      crossSec.replaceChildren(h('h3', { class: 'v-label', text: 'Crossbreeds' }),
+        h('p', { class: 'arch-facts-sub', text: 'Two real ventures spliced. One mechanism stolen from the donor, grafted onto the host. Anyone can manifest one; it becomes your venture, sealed to you.' }),
+        h('div', { class: 'splices' }, ...cs.map(c => {
+          const host = d.ventures[c.host_slug] || { slug: c.host_slug, name: c.host_slug }, donor = d.ventures[c.donor_slug] || { slug: c.donor_slug, name: c.donor_slug };
+          return h('article', { class: 'splice' },
+            h('div', { class: 'r-evidence', style: { marginTop: '0', marginBottom: '14px' } }, ventureChip(host), h('span', { class: 'x', text: '×' }), ventureChip(donor)),
+            h('h3', { class: 's-name', text: c.name }),
+            h('p', { class: 's-stole' }, h('b', { text: 'Stole' }), c.stole),
+            h('p', { class: 's-hybrid', text: c.hybrid }),
+            h('p', { class: 's-test' }, h('b', { text: 'Why it works anyway' }), c.why_it_does),
+            h('div', { class: 's-foot' }, h('button', { class: 'btn small primary', text: 'Manifest this →', onclick: () => manifestSentence(c.sentence) }), h('span', { class: 's-sentence', text: c.sentence })));
+        })));
+      crossSec.classList.remove('hidden');
+    }
+    function renderFacts(d) {
+      const p = d.patterns; const rows = [];
+      const names = (slugs) => slugs.map(s => (d.ventures[s] || {}).name || s).join(', ');
+      p.convergence.forEach(c => rows.push(['Same supplier world', `${c.family}: ${names(c.slugs)}`]));
+      p.ask_pairs.forEach(a => rows.push(['Asks one shop could fill', `${a.family || a.shared.join(', ')}: ${names(a.slugs)}`]));
+      p.echo.filter(e => e.buy + e.build + e.fund > 0).forEach(e => rows.push(['Signals landing', `${e.world}: ${e.buy} buy · ${e.build} build · ${e.fund} fund (${names(e.ventures)})`]));
+      if (p.stalled_paths.length) rows.push(['Paths not moving', names(p.stalled_paths)]);
+      if (p.unanswered_asks.length) rows.push(['Asks with no hands', p.unanswered_asks.map(id => (d.asks[id] || {}).title || id).join(' · ')]);
+      p.gaps.forEach(g => rows.push(['Needed, not on the Floor', `${g.family} (needed by ${names(g.slugs)})`]));
+      facts.replaceChildren(h('h3', { class: 'v-label', text: 'What it counted' }), h('p', { class: 'arch-facts-sub', text: 'The rows underneath the readings. Computed, not written.' }),
+        h('dl', { class: 'facts' }, ...rows.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', { text: v })])));
+      facts.classList.toggle('hidden', rows.length === 0);
+    }
+    load();
+    root.cleanup = () => clearTimeout(timer);
     return root;
   }
 

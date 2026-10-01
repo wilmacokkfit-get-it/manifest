@@ -83,6 +83,7 @@ PUBLISHED = bool(os.environ.get(ANTHROPIC_KEY_VAR) or os.environ.get(OPENAI_KEY_
 TRUST_VISITOR_HEADER = os.environ.get("TRUST_VISITOR_HEADER", "0") == "1" and not PUBLISHED
 
 from app import llm  # noqa: E402
+from app import architect as arch  # noqa: E402
 from app.partial_json import parse_partial  # noqa: E402
 from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
 from app.store import build_store, day_start_iso, hours_ago_iso  # noqa: E402
@@ -200,6 +201,7 @@ def _public_view(v: dict, *, is_owner: bool, counts: dict | None = None, needs: 
         "grounding": v.get("grounding") or {},
         "images": v.get("images") or [],
         "render_count": len(v.get("image_prompts") or []),
+        "splices": (v.get("splices") or None) if is_owner else None,
         "images_status": v.get("images_status", "pending"),
         "visibility": v.get("visibility", "private"),
         "status": v.get("status"),
@@ -632,6 +634,125 @@ async def marketplace():
     return {"marked": [c for c in cards if c["marked"]], "rising": [c for c in cards if not c["marked"]], "requests": requests_}
 
 
+# ---------------------------------------------------------------------------
+# The Architect: cross-Floor readings, cached, regenerated only when the rows change
+# ---------------------------------------------------------------------------
+_ARCH_TASK: asyncio.Task | None = None
+_ARCH_LAST_RUN = 0.0
+ARCH_MIN_INTERVAL = int(os.environ.get("ARCHITECT_MIN_INTERVAL", "300"))   # seconds between regenerations
+
+
+async def _arch_requests():
+    needs = await store.list_open_needs(60)
+    return [{"id": n["id"], "title": n["title"], "detail": n.get("detail") or "", "step_n": n.get("step_n"),
+             "offer_count": int(n.get("offer_count") or 0), "created_at": n["created_at"],
+             "venture": {"slug": n["venture_slug"], "name": n["venture_name"], "accent": n.get("venture_accent") or "#e8eeff"}}
+            for n in needs]
+
+
+async def _arch_regenerate(facts: dict, h: str) -> None:
+    global _ARCH_LAST_RUN
+    _ARCH_LAST_RUN = time.time()
+    try:
+        readings, crosses = await arch.write_readings(facts)
+        await store.set_architect(h, {"readings": readings, "crossbreeds": crosses}, now_iso())
+        print(f"[architect] {len(readings)} readings, {len(crosses)} crossbreeds for {facts['counts']}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[architect] failed: {e}")
+
+
+def _arch_part(cached: dict | None, key: str) -> list:
+    """Cache holds {"readings": [...], "crossbreeds": [...]}; older rows held a bare readings list."""
+    data = (cached or {}).get("readings")
+    if isinstance(data, dict):
+        return data.get(key) or []
+    return (data or []) if key == "readings" else []
+
+
+@app.get("/api/architect")
+async def architect_view():
+    """What the whole Floor looks like from above. Facts are real rows; prose is the engine's, labeled as such."""
+    global _ARCH_TASK
+    rows = await store.list_public(80)
+    reqs = await _arch_requests()
+    facts = arch.compute_facts(rows, reqs)
+    h = arch.facts_hash(facts)
+    cached = await store.get_architect()
+    is_thin = arch.thin(facts)
+    fresh = bool(cached and cached.get("input_hash") == h)
+    pending = False
+    if not is_thin and not fresh and llm.text_provider() != "mock":
+        running = _ARCH_TASK is not None and not _ARCH_TASK.done()
+        if not running and time.time() - _ARCH_LAST_RUN >= ARCH_MIN_INTERVAL:
+            _ARCH_TASK = asyncio.create_task(_arch_regenerate(facts, h))
+            pending = True
+        elif running:
+            pending = True
+    ventures = {v["slug"]: {"slug": v["slug"], "name": v.get("name"), "accent": v.get("accent") or "#e8eeff",
+                            "image": next((u for u in (v.get("images") or []) if u), None)} for v in rows}
+    asks = {a["id"]: a for a in reqs}
+    return {
+        "counts": facts["counts"], "thin": is_thin, "pending": pending, "fresh": fresh,
+        "generated_at": (cached or {}).get("generated_at"),
+        "readings": _arch_part(cached, "readings"), "crossbreeds": _arch_part(cached, "crossbreeds"),
+        "ventures": ventures, "asks": asks,
+        "patterns": {"convergence": facts["convergence"], "adjacency": facts["adjacency"], "ask_pairs": facts["ask_pairs"],
+                     "echo": facts["echo"], "stalled_paths": facts["stalled_paths"], "unanswered_asks": facts["unanswered_asks"], "gaps": facts["gaps"]},
+    }
+
+
+class SpliceBody(BaseModel):
+    with_slug: str | None = Field(default=None, max_length=80)   # another public venture, or None for a lateral field
+    lateral: bool = False
+
+
+SPLICE_PER_DAY = int(os.environ.get("SPLICE_PER_DAY", "6"))      # crossbreed runs per venture per day
+
+
+@app.post("/api/ventures/{slug}/crossbreed")
+async def crossbreed(slug: str, body: SpliceBody, request: Request):
+    """Owner splices this venture with another on the Floor, or with a field from left. Result saved on the venture (owner-only)."""
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can crossbreed this venture.")
+    prev = v.get("splices") or {}
+    today = day_start_iso()
+    runs_today = [r for r in (prev.get("runs") or []) if r >= today]
+    if len(runs_today) >= SPLICE_PER_DAY:
+        raise HTTPException(429, f"{SPLICE_PER_DAY} crossbreeds a day per venture. Come back tomorrow.")
+    donor = None
+    field = None
+    if body.with_slug and not body.lateral:
+        donor = await store.get_by_slug(body.with_slug)
+        if not donor or donor.get("visibility") != "public" or donor["slug"] == v["slug"]:
+            raise HTTPException(404, "That venture isn't on the Floor.")
+    elif not body.lateral:
+        # Architect picks: the strongest adjacency on the Floor, else a random public venture, else go lateral
+        rows = [r for r in await store.list_public(80) if r["slug"] != v["slug"]]
+        if rows:
+            facts = arch.compute_facts(rows + [v], await _arch_requests())
+            adj = next((a for a in facts["adjacency"] if v["slug"] in a["slugs"]), None)
+            pick = next((s for s in adj["slugs"] if s != v["slug"]), None) if adj else random.choice(rows)["slug"]
+            donor = next((r for r in rows if r["slug"] == pick), None)
+    if donor is None:
+        field = random.choice(arch.LATERAL_FIELDS)
+    try:
+        splices = await arch.write_crossbreed(v, donor, field)
+    except Exception as e:  # noqa: BLE001
+        print(f"[crossbreed] {slug} failed: {e}")
+        raise HTTPException(502, "The Architect stalled. Try again in a minute.")
+    if not splices:
+        raise HTTPException(502, "The Architect couldn't find a splice that holds. Try another donor.")
+    result = {
+        "donor": {"kind": "venture", "slug": donor["slug"], "name": donor["name"], "accent": donor.get("accent") or "#e8eeff"} if donor else {"kind": "field", "name": field},
+        "splices": splices, "generated_at": now_iso(),
+        "runs": (runs_today + [now_iso()])[-SPLICE_PER_DAY:],
+        "history": ([{"donor": prev.get("donor"), "splices": prev.get("splices"), "generated_at": prev.get("generated_at")}] if prev.get("splices") else []) + (prev.get("history") or [])[:4],
+    }
+    saved = await store.update_venture(v["id"], {"splices": result})
+    return await _full_view(saved, True)
+
+
 class WaitlistBody(BaseModel):
     name: str = ""
     email: str
@@ -684,6 +805,7 @@ def _shell(og: dict | None = None) -> str:
 @app.get("/marketplace", response_class=HTMLResponse)
 @app.get("/waitlist", response_class=HTMLResponse)
 @app.get("/about", response_class=HTMLResponse)
+@app.get("/architect", response_class=HTMLResponse)
 async def index():
     return _shell()
 

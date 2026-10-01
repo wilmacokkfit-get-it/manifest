@@ -96,3 +96,14 @@ create table if not exists public.offers (
 
 alter table public.needs enable row level security;
 alter table public.offers enable row level security;
+
+
+-- v3: the Architect (cached cross-Floor readings)
+create table if not exists public.architect (
+  id integer primary key check (id = 1),
+  input_hash text,
+  readings jsonb,
+  generated_at timestamptz
+);
+alter table public.architect enable row level security;
+alter table public.ventures add column if not exists splices jsonb;

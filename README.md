@@ -6,6 +6,8 @@ Type a sentence, watch the name appear inside the orb, then the tagline, the thr
 
 Then the creator picks a path. One of the three ways to build it becomes a step-by-step guide written by the engine: what to do, why, suggested suppliers to call (labeled as suggestions, not vetted), rough cost and time, and what "done" looks like. The creator checks steps off, keeps notes, and when stuck posts an ask to the Floor. Real people raise a hand with a real email. Marketplace and Shark Tank in one page.
 
+Then the Architect. Every creator sees only their own page. The Architect reads the whole Floor at once and writes readings over real rows: whose paths call for the same shop (pool the order), whose buyers overlap (share the interviews), which open asks one supplier could fill together, where real signals are landing, what is stalled. And it crossbreeds: it splices two real ventures, or a venture with a field that has nothing to do with it (vending machines, beehives, ski lifts), steals one specific mechanism, and shows the hybrid that should not work but does. One tap turns a hybrid into its own venture, sealed to whoever manifests it.
+
 There are no fake numbers anywhere in this product. Every count you see is a row in the database that a real person created.
 
 ---
@@ -26,8 +28,9 @@ manifest/
     app.js               The whole front end. Vanilla JS, no build step.
     styles.css           Design system: near-black, Playfair Display + Inter, breathing orb
     favicon.svg, og-default.png
+    architect.py         The Architect: facts from rows, readings + crossbreeds over them
   supabase/
-    migration.sql        Tables + storage bucket (v1 applied; v2 below, run it once)
+    migration.sql        Tables + storage bucket (v1 applied; v2 and v3 below, run once)
   requirements.txt
   .env.example           Every setting, explained
 ```
@@ -101,10 +104,10 @@ Want Claude writing the text instead? Add `ANTHROPIC_API_KEY`, set `LLM_PROVIDER
 
 The three v1 tables (`ventures`, `signals`, `waitlist`) and the public `renders` storage bucket are already created in your Manifest project. Row Level Security is on and there are no anon policies, so only the server (using the service role key) can read or write.
 
-**v2 needs one more run.** The Path layer adds a `path` column on `ventures` and two tables, `needs` and `offers`. The Supabase connection timed out when I tried to apply it, so do this once, about a minute:
+**v2 and v3 need one run.** The Path layer adds a `path` column on `ventures` and two tables, `needs` and `offers`; the Architect adds a `splices` column and an `architect` cache table. The Supabase connection timed out when I tried to apply it, so do this once, about a minute:
 
 1. Open your Supabase project, click **SQL Editor** in the left bar, then **New query**.
-2. Open `supabase/migration.sql`, copy everything from the line `-- v2: the Path` to the end, paste it in, click **Run**.
+2. Open `supabase/migration.sql`, copy everything from the line `-- v2: the Path` to the end (v2 and v3), paste it in, click **Run**.
 3. You should see "Success. No rows returned." Done. (Every statement is `if not exists`, so running it twice is harmless.)
 
 If you skip this and use `STORE=supabase`, choosing a path will fail with a column error. SQLite mode needs nothing; it adds the column and tables itself.
@@ -122,6 +125,10 @@ If you skip this and use `STORE=supabase`, choosing a path will fail with a colu
 **Signals.** Three buttons, each needs a real email, one per email per type per venture (enforced by a unique constraint). "I'd buy this" can carry an optional price. Counts are cached on the venture row. When `total >= MARK_THRESHOLD_SIGNALS` or `build + fund >= MARK_THRESHOLD_BUILD_FUND`, the venture gets `promoted_at` and moves to the Marked shelf on the Floor.
 
 **The Path.** `POST /api/ventures/<slug>/path` with `{tier: 0|1|2}` streams a 5-7 step guide the same way the venture streams; the front end shows the first move and each step title as it lands. Steps live in the `path` JSON on the venture: `title, why, how[], suppliers[{kind, examples[], search}], cost, time, done_when, status, note`. The owner PATCHes `/path/steps/<n>` with `{status}` or `{note}`. Re-choosing is blocked (409) once any step has moved; the owner has to Reset first (DELETE `/path`). Supplier names are the model's suggestions; the UI labels them "Suggested by the engine, not vetted" and every one is just a Google search link. Notes are owner-only and stripped from public views.
+
+**The Architect.** `GET /api/architect` computes facts in Python from real rows (`app/architect.py`: supplier families across paths, buyer-world overlaps, rhyming asks, signal echoes, stalls, gaps), hashes them, and only calls the model when the rows changed (and at most every `ARCHITECT_MIN_INTERVAL` seconds, default 300). The model writes 3-6 readings and 2-3 crossbreeds over those facts; anything it names that is not a real venture or ask is dropped. Readings are cached in the `architect` table. Thin Floor (fewer than two ventures, no asks) means no model call and an honest "nothing to see yet." Venture pages show the readings that mention them.
+
+**Crossbreed.** `POST /api/ventures/<slug>/crossbreed` with `{with_slug}` (another public venture), `{lateral: true}` (a random field from `LATERAL_FIELDS`), or `{}` (the Architect picks the strongest adjacency). Returns three splices, each with what was stolen, the hybrid, why it should not work, why it does, a first test with a number, and a one-sentence prompt. Owner-only, `SPLICE_PER_DAY` (6) runs per venture per day, saved on the venture with history. "Manifest this" drops the sentence into the orb.
 
 **Asks and offers.** The owner posts an ask on a step (`POST /needs`, max 12 open per venture). If the venture is public it shows on the Floor under "Open asks." Anyone can raise a hand (`POST /needs/<id>/offers`) with a real email, one per email per ask. Only the owner sees the emails and messages, and can mark the ask filled. Offer counts are real rows, same rule as signals.
 
