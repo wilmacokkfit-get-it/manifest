@@ -160,6 +160,54 @@ class ServerRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(owner.status_code, 200)
         self.assertEqual(owner.json()["path"]["steps"][0]["status"], "doing")
 
+    async def test_private_venture_rejects_unauthorized_needs_and_offers(self) -> None:
+        row = await self.store.create_venture(private_venture(slug="private-needs-guard"))
+        before = await self.store.get_by_slug(row["slug"])
+        need_id = str(uuid.uuid4())
+        base_url = f"/api/ventures/{row['slug']}/needs"
+        attempts = [
+            ("POST", base_url, {"step_n": 1, "title": "Help build a prototype", "detail": "Test only."}),
+            ("PATCH", f"{base_url}/{need_id}", {"status": "filled"}),
+            ("POST", f"{base_url}/{need_id}/offers",
+             {"email": "helper@example.test", "name": "Test helper", "message": "I can help."}),
+        ]
+        callers = {
+            "anonymous": {},
+            "non-owner": {"Cookie": f"{server.COOKIE}=someone-elses-token"},
+        }
+
+        # A missing ask must not mask a broken privacy guard: reject callers
+        # before even looking up the ask, and never attempt any writes.
+        with (
+            patch.object(self.store, "get_need", wraps=self.store.get_need) as get_need,
+            patch.object(self.store, "create_need", wraps=self.store.create_need) as create_need,
+            patch.object(self.store, "set_need_status", wraps=self.store.set_need_status) as set_status,
+            patch.object(self.store, "add_offer", wraps=self.store.add_offer) as add_offer,
+        ):
+            for caller, headers in callers.items():
+                async with self.client() as client:
+                    for method, url, body in attempts:
+                        # Don't let the anonymous client's newly issued cookie
+                        # turn subsequent requests into authenticated requests.
+                        client.cookies.clear()
+                        response = await client.request(method, url, headers=headers, json=body)
+                        with self.subTest(caller=caller, method=method, url=url):
+                            self.assertEqual(response.status_code, 404)
+                            self.assertNotIn(row["slug"], response.text)
+                            self.assertNotIn(row["name"], response.text)
+                            self.assertEqual(await self.store.get_by_slug(row["slug"]), before)
+                            self.assertEqual(await self.store.list_needs(row["id"]), [])
+                            self.assertEqual(await self.store.list_offers(need_id), [])
+                            self.assertEqual(self.store._db.execute("SELECT COUNT(*) FROM needs").fetchone()[0], 0)
+                            self.assertEqual(self.store._db.execute("SELECT COUNT(*) FROM offers").fetchone()[0], 0)
+
+            get_need.assert_not_awaited()
+            create_need.assert_not_awaited()
+            set_status.assert_not_awaited()
+            add_offer.assert_not_awaited()
+
+        self.assertEqual(await self.store.list_public(), [])
+
     async def test_explicit_openai_selection_fails_cleanly_without_credentials(self) -> None:
         with patch.dict(os.environ, {"LLM_PROVIDER": "openai"}, clear=False):
             os.environ.pop("OPENAI_API_KEY", None)
