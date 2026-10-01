@@ -7,8 +7,8 @@ channel = "stable-24_05"
 packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "tcl", "tk", "zlib"]
 
 [deployment]
-run = ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port 8000"]
-deploymentTarget = "cloudrun"
+run = ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "5000"]
+deploymentTarget = "autoscale"
 
 [[ports]]
 localPort = 5000

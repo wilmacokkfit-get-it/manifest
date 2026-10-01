@@ -20,7 +20,7 @@ The OpenAI key has been supplied securely. Real streaming venture generation, pr
 
 ## Publishing later
 
-The imported deployment command still serves port 8000. This setup only configures the workspace preview; it does not publish the app. Review durable storage before publishing: do not assume workspace SQLite files survive deployment restarts or redeployments. The existing Supabase backend is available if chosen explicitly. Obtain the actual published URL before setting `PUBLIC_URL`; do not invent one.
+The publishing command uses `python -m uvicorn server:app --host 0.0.0.0 --port 5000`, matching the configured port forwarded to external port 80. Changes to publishing settings take effect only after republishing. Supabase is the active durable storage backend; do not assume workspace SQLite files survive deployment restarts or redeployments. Obtain the actual published URL before setting `PUBLIC_URL`; do not invent one.
 
 ## Supabase connection
 
