@@ -96,3 +96,10 @@ create table if not exists public.offers (
 
 alter table public.needs enable row level security;
 alter table public.offers enable row level security;
+
+-- Bypassing RLS does not grant SQL table privileges. Grant only the backend
+-- role access; no browser/anonymous roles are granted access here.
+grant usage on schema public to service_role;
+grant select, insert, update, delete
+  on public.ventures, public.signals, public.waitlist, public.needs, public.offers
+  to service_role;

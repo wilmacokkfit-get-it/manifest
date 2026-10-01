@@ -21,3 +21,11 @@ The OpenAI key has been supplied securely. Real streaming venture generation, pr
 ## Publishing later
 
 The imported deployment command still serves port 8000. This setup only configures the workspace preview; it does not publish the app. Review durable storage before publishing: do not assume workspace SQLite files survive deployment restarts or redeployments. The existing Supabase backend is available if chosen explicitly. Obtain the actual published URL before setting `PUBLIC_URL`; do not invent one.
+
+## Supabase connection
+
+Use `SUPABASE_URL` and `SUPABASE_SECRET_KEY` in Secrets. Legacy `SUPABASE_SERVICE_ROLE_KEY` is also supported. Modern secret keys are sent only as `apikey`, not as JWT bearer tokens. Bare Supabase project hostnames are normalized to HTTPS.
+
+Run the full `supabase/migration.sql` in Supabase's SQL Editor, including its final grants to `service_role`. RLS bypass does not replace SQL table privileges.
+
+`STORE=sqlite` keeps local data in use even when Supabase secrets exist. Set `STORE=supabase` after verifying the database permissions; missing secrets fail explicitly. The default `STORE=auto` selects Supabase when its settings exist, otherwise SQLite. Switching backends does not migrate or delete existing SQLite ventures or images.

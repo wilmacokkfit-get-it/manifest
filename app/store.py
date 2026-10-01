@@ -5,7 +5,8 @@ Two interchangeable backends:
 * SQLiteStore   – zero-config default. One file in ./data. Good for local
                   runs, previews, and the first few thousand ventures.
 * SupabaseStore – used automatically when SUPABASE_URL and
-                  SUPABASE_SERVICE_ROLE_KEY are set. Talks to PostgREST and
+                  SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_ROLE_KEY)
+                  are set. Talks to PostgREST and
                   Supabase Storage directly over HTTPS (no extra SDK).
 
 Both expose the same async surface so server.py never cares which is live.
@@ -16,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -339,14 +341,24 @@ class SupabaseStore:
     kind = "supabase"
 
     def __init__(self, url: str, service_key: str, bucket: str = "renders"):
-        self.url = url.rstrip("/")
+        url = url.strip().rstrip("/")
+        if re.fullmatch(r"[a-zA-Z0-9-]+\.supabase\.(co|in)", url):
+            url = f"https://{url}"
+        parsed_url = httpx.URL(url)
+        if parsed_url.scheme not in ("https", "http") or not parsed_url.host:
+            raise ValueError("SUPABASE_URL must be your project's HTTP(S) API URL.")
+        self.url = url
         self.key = service_key
         self.bucket = bucket
+        # Modern secret keys are API keys, not JWTs. Only legacy service-role
+        # JWTs belong in Authorization; both formats use the apikey header.
+        self._auth_headers = {"apikey": self.key}
+        if not self.key.startswith("sb_secret_"):
+            self._auth_headers["Authorization"] = f"Bearer {self.key}"
         self._client = httpx.AsyncClient(
             base_url=self.url,
             headers={
-                "apikey": self.key,
-                "Authorization": f"Bearer {self.key}",
+                **self._auth_headers,
                 "Content-Type": "application/json",
             },
             timeout=30,
@@ -395,7 +407,7 @@ class SupabaseStore:
             r = c.get(
                 f"{self.url}/rest/v1/ventures",
                 params={"slug": f"eq.{slug}", "select": "id", "limit": 1},
-                headers={"apikey": self.key, "Authorization": f"Bearer {self.key}"},
+                headers=self._auth_headers,
             )
             return bool(r.status_code == 200 and r.json())
 
@@ -523,9 +535,15 @@ class SupabaseStore:
 # ---------------------------------------------------------------------------
 
 def build_store() -> SQLiteStore | SupabaseStore:
+    mode = os.environ.get("STORE", "auto").strip().lower()
+    if mode not in ("auto", "sqlite", "supabase"):
+        raise ValueError("STORE must be auto, sqlite, or supabase.")
     url = os.environ.get("SUPABASE_URL", "").strip()
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    if url and key:
+    key = (os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+           or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip())
+    if mode == "supabase" and not (url and key):
+        raise ValueError("Supabase requires SUPABASE_URL and a backend secret key.")
+    if mode == "supabase" or (mode == "auto" and url and key):
         return SupabaseStore(url, key, os.environ.get("SUPABASE_RENDERS_BUCKET", "renders"))
     return SQLiteStore(os.environ.get("MANIFEST_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
 
