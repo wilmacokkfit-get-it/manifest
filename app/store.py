@@ -29,7 +29,7 @@ import httpx
 
 from .provenance import now_iso
 
-JSON_FIELDS = ("tiers", "roadmap", "grounding", "image_prompts", "images", "path")
+JSON_FIELDS = ("tiers", "roadmap", "grounding", "image_prompts", "images", "path", "splices")
 WORK_LEASE_SECONDS = 300
 RENDER_LEASE_SECONDS = 600
 
@@ -55,7 +55,7 @@ VENTURE_COLUMNS = [
     "name", "tagline", "description", "category", "accent",
     "tiers", "roadmap", "grounding", "image_prompts", "images", "images_status",
     "visibility", "status", "signal_count", "buy_count", "build_count", "fund_count",
-    "promoted_at", "released_at", "created_at", "updated_at", "path",
+    "promoted_at", "released_at", "created_at", "updated_at", "path", "splices",
 ]
 
 
@@ -229,11 +229,19 @@ class SQLiteStore(RenderAccess):
                   created_at TEXT NOT NULL,
                   UNIQUE(need_id, email)
                 );
+                CREATE TABLE IF NOT EXISTS architect (
+                  id INTEGER PRIMARY KEY CHECK (id = 1),
+                  input_hash TEXT,
+                  readings TEXT,
+                  generated_at TEXT
+                );
                 """
             )
             cols = {r[1] for r in self._db.execute("PRAGMA table_info(ventures)").fetchall()}
             if "path" not in cols:
                 self._db.execute("ALTER TABLE ventures ADD COLUMN path TEXT")
+            if "splices" not in cols:
+                self._db.execute("ALTER TABLE ventures ADD COLUMN splices TEXT")
             self._db.commit()
 
     # -- helpers ------------------------------------------------------------
@@ -677,6 +685,21 @@ class SQLiteStore(RenderAccess):
         with self._lock:
             rows = self._db.execute("SELECT * FROM offers WHERE need_id = ? ORDER BY created_at", [need_id]).fetchall()
         return [dict(r) for r in rows]
+
+    # -- architect cache -----------------------------------------------------
+    async def get_architect(self) -> dict | None:
+        with self._lock:
+            r = self._db.execute("SELECT input_hash, readings, generated_at FROM architect WHERE id = 1").fetchone()
+        if not r:
+            return None
+        return {"input_hash": r["input_hash"], "readings": json.loads(r["readings"] or "[]"), "generated_at": r["generated_at"]}
+
+    async def set_architect(self, input_hash: str, readings: list, generated_at: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT INTO architect (id, input_hash, readings, generated_at) VALUES (1, ?, ?, ?) "
+                             "ON CONFLICT(id) DO UPDATE SET input_hash = excluded.input_hash, readings = excluded.readings, generated_at = excluded.generated_at",
+                             [input_hash, json.dumps(readings), generated_at])
+            self._db.commit()
 
     # -- renders ------------------------------------------------------------
     def _legacy_render_url(self, venture_id: str, idx: int, ext: str) -> str:
@@ -1212,6 +1235,27 @@ class SupabaseStore(RenderAccess):
         if r.status_code >= 400:
             raise RuntimeError(f"Storage download failed: {r.status_code}")
         return r.content, f"image/{ext}"
+
+    # -- architect cache (table `architect`, see migration v3; falls back to memory if missing) --
+    _architect_mem: dict | None = None
+
+    async def get_architect(self) -> dict | None:
+        try:
+            rows = await self._rest("GET", "architect", params={"id": "eq.1", "select": "input_hash,readings,generated_at"}) or []
+            if rows:
+                r = rows[0]
+                return {"input_hash": r.get("input_hash"), "readings": r.get("readings") or [], "generated_at": r.get("generated_at")}
+        except Exception:
+            pass
+        return self._architect_mem
+
+    async def set_architect(self, input_hash: str, readings: list, generated_at: str) -> None:
+        self._architect_mem = {"input_hash": input_hash, "readings": readings, "generated_at": generated_at}
+        try:
+            await self._rest("POST", "architect", json_body={"id": 1, "input_hash": input_hash, "readings": readings, "generated_at": generated_at},
+                             prefer="resolution=merge-duplicates,return=minimal")
+        except Exception:
+            pass
 
     async def save_render(self, venture_id: str, idx: int, png: bytes, *, render_claim_id: str | None = None) -> str:
         data, ext, mime = await asyncio.to_thread(compress_render, png)

@@ -106,9 +106,19 @@ create table if not exists public.offers (
 alter table public.needs enable row level security;
 alter table public.offers enable row level security;
 
+-- v3: the Architect (cached cross-Floor readings)
+create table if not exists public.architect (
+  id integer primary key check (id = 1),
+  input_hash text,
+  readings jsonb,
+  generated_at timestamptz
+);
+alter table public.architect enable row level security;
+alter table public.ventures add column if not exists splices jsonb;
+
 -- Bypassing RLS does not grant SQL table privileges. Grant only the backend
 -- role access; no browser/anonymous roles are granted access here.
 grant usage on schema public to service_role;
 grant select, insert, update, delete
-  on public.ventures, public.signals, public.waitlist, public.needs, public.offers
+  on public.ventures, public.signals, public.waitlist, public.needs, public.offers, public.architect
   to service_role;
