@@ -1,4 +1,4 @@
-"""Regression coverage for generation, private venture access, and SQLite."""
+"""Regression coverage for generation, venture permissions, and SQLite."""
 
 from __future__ import annotations
 
@@ -95,6 +95,10 @@ class ServerRegressionTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.ASGITransport(app=server.app),
             base_url="http://testserver",
         )
+
+    def database_snapshot(self) -> list[str]:
+        """Capture every row in this test's disposable SQLite database."""
+        return list(self.store._db.iterdump())
 
     async def test_private_venture_denies_anonymous_and_allows_owner(self) -> None:
         row = await self.store.create_venture(private_venture())
@@ -209,6 +213,167 @@ class ServerRegressionTests(unittest.IsolatedAsyncioTestCase):
             add_offer.assert_not_awaited()
 
         self.assertEqual(await self.store.list_public(), [])
+
+    async def test_public_venture_rejects_outsider_need_changes_without_writes(self) -> None:
+        row = await self.store.create_venture(
+            {**private_venture(slug="public-needs-guard"), "visibility": "public"}
+        )
+        need = await self.store.create_need(row["id"], 1, "Help build a prototype", "Test only.")
+        await self.store.add_offer(need["id"], "existing@example.test", "Existing helper", "Keep this.")
+        before = self.database_snapshot()
+        base_url = f"/api/ventures/{row['slug']}/needs"
+        attempts = [
+            ("POST", base_url, {"step_n": 1, "title": "Unauthorized ask", "detail": "Do not save."}),
+            *[("PATCH", f"{base_url}/{need['id']}", {"status": status})
+              for status in ("open", "filled", "closed")],
+        ]
+        callers = {
+            "anonymous": {},
+            "non-creator": {"Cookie": f"{server.COOKIE}=someone-elses-token"},
+        }
+
+        with (
+            patch.object(self.store, "create_need", wraps=self.store.create_need) as create_need,
+            patch.object(self.store, "set_need_status", wraps=self.store.set_need_status) as set_status,
+        ):
+            async with self.client() as client:
+                for caller, headers in callers.items():
+                    for method, url, body in attempts:
+                        client.cookies.clear()
+                        with self.subTest(caller=caller, method=method, body=body):
+                            response = await client.request(method, url, headers=headers, json=body)
+                            self.assertEqual(response.status_code, 403)
+                            self.assertEqual(self.database_snapshot(), before)
+            create_need.assert_not_awaited()
+            set_status.assert_not_awaited()
+
+    async def test_public_venture_creator_can_create_and_update_needs(self) -> None:
+        row = await self.store.create_venture(
+            {**private_venture(slug="public-creator-needs"), "visibility": "public"}
+        )
+        base_url = f"/api/ventures/{row['slug']}/needs"
+        headers = {"Cookie": f"{server.COOKIE}={row['owner_token']}"}
+        async with self.client() as client:
+            response = await client.post(
+                base_url,
+                headers=headers,
+                json={"step_n": 1, "title": "Help build a prototype", "detail": "Test only."},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["is_owner"])
+            needs = await self.store.list_needs(row["id"])
+            self.assertEqual(len(needs), 1)
+            need = needs[0]
+            self.assertEqual(need["venture_id"], row["id"])
+            self.assertEqual(need["step_n"], 1)
+            self.assertEqual(need["title"], "Help build a prototype")
+            self.assertEqual(need["detail"], "Test only.")
+            self.assertEqual(need["status"], "open")
+            self.assertEqual(response.json()["needs"][0]["id"], need["id"])
+            await self.store.add_offer(need["id"], "helper@example.test", "Helper", "Keep this offer.")
+            offers_before = await self.store.list_offers(need["id"])
+
+            for status in ("filled", "closed", "open"):
+                with self.subTest(status=status):
+                    updated = await client.patch(
+                        f"{base_url}/{need['id']}", headers=headers, json={"status": status},
+                    )
+                    self.assertEqual(updated.status_code, 200)
+                    self.assertTrue(updated.json()["is_owner"])
+                    self.assertEqual(updated.json()["needs"][0]["status"], status)
+                    self.assertEqual(
+                        await self.store.get_need(need["id"]),
+                        {**need, "status": status, "offer_count": 1},
+                    )
+                    self.assertEqual(await self.store.list_offers(need["id"]), offers_before)
+
+        self.assertEqual(await self.store.get_by_slug(row["slug"]), row)
+
+    async def test_public_creator_cannot_update_another_ventures_need(self) -> None:
+        row = await self.store.create_venture(
+            {**private_venture(slug="public-local-ask"), "visibility": "public"}
+        )
+        other = await self.store.create_venture(
+            {**private_venture(slug="public-other-ask", owner="different-creator-token"), "visibility": "public"}
+        )
+        local_need = await self.store.create_need(row["id"], 1, "Local ask", "Keep this.")
+        foreign_need = await self.store.create_need(other["id"], 1, "Other ask", "Keep this too.")
+        await self.store.add_offer(foreign_need["id"], "helper@example.test", "Helper", "Keep this offer.")
+        before = self.database_snapshot()
+        headers = {"Cookie": f"{server.COOKIE}={row['owner_token']}"}
+        attempts = [
+            (foreign_need["id"], "closed", 404),
+            (str(uuid.uuid4()), "filled", 404),
+            (local_need["id"], "invalid", 400),
+        ]
+        with patch.object(self.store, "set_need_status", wraps=self.store.set_need_status) as set_status:
+            async with self.client() as client:
+                for need_id, status, expected in attempts:
+                    with self.subTest(need_id=need_id, status=status):
+                        response = await client.patch(
+                            f"/api/ventures/{row['slug']}/needs/{need_id}",
+                            headers=headers, json={"status": status},
+                        )
+                        self.assertEqual(response.status_code, expected)
+                        self.assertEqual(self.database_snapshot(), before)
+            set_status.assert_not_awaited()
+
+    async def test_public_visitors_offer_only_on_open_asks_in_requested_venture(self) -> None:
+        row = await self.store.create_venture(
+            {**private_venture(slug="public-offer-guard"), "visibility": "public"}
+        )
+        other = await self.store.create_venture(
+            {**private_venture(slug="public-foreign-offer", owner="different-creator-token"), "visibility": "public"}
+        )
+        open_need = await self.store.create_need(row["id"], 1, "Open ask", "Accept help.")
+        closed_need = await self.store.create_need(row["id"], 1, "Closed ask", "No more help.")
+        filled_need = await self.store.create_need(row["id"], 1, "Filled ask", "Already helped.")
+        foreign_need = await self.store.create_need(other["id"], 1, "Foreign open ask", "Wrong venture.")
+        await self.store.set_need_status(closed_need["id"], "closed")
+        await self.store.set_need_status(filled_need["id"], "filled")
+        callers = {
+            "anonymous": {},
+            "non-creator": {"Cookie": f"{server.COOKIE}=someone-elses-token"},
+        }
+        base_url = f"/api/ventures/{row['slug']}/needs"
+        async with self.client() as client:
+            for offer_count, (caller, headers) in enumerate(callers.items(), start=1):
+                body = {"email": f"{caller}@example.test", "name": "Test helper", "message": "I can help."}
+                client.cookies.clear()
+                response = await client.post(
+                    f"{base_url}/{open_need['id']}/offers", headers=headers, json=body,
+                )
+                with self.subTest(caller=caller, ask="open"):
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.json()["added"])
+                    self.assertFalse(response.json()["is_owner"])
+                    visible_need = next(n for n in response.json()["needs"] if n["id"] == open_need["id"])
+                    self.assertNotIn("offers", visible_need)
+                    offers = await self.store.list_offers(open_need["id"])
+                    self.assertEqual(len(offers), offer_count)
+                    self.assertTrue(all(o["need_id"] == open_need["id"] for o in offers))
+                    self.assertEqual(
+                        [{key: o[key] for key in body} for o in offers if o["email"] == body["email"]],
+                        [body],
+                    )
+                    self.assertEqual((await self.store.get_need(open_need["id"]))["offer_count"], offer_count)
+                    self.assertEqual(visible_need["offer_count"], offer_count)
+
+                before = self.database_snapshot()
+                with patch.object(self.store, "add_offer", wraps=self.store.add_offer) as add_offer:
+                    for need_id in (closed_need["id"], filled_need["id"], foreign_need["id"], str(uuid.uuid4())):
+                        client.cookies.clear()
+                        with self.subTest(caller=caller, rejected_need=need_id):
+                            rejected = await client.post(
+                                f"{base_url}/{need_id}/offers", headers=headers, json=body,
+                            )
+                            self.assertEqual(rejected.status_code, 404)
+                            self.assertEqual(self.database_snapshot(), before)
+                    add_offer.assert_not_awaited()
+
+        self.assertEqual(len(await self.store.list_offers(open_need["id"])), 2)
+        self.assertEqual(await self.store.get_by_slug(row["slug"]), row)
+        self.assertEqual(await self.store.get_by_slug(other["slug"]), other)
 
     async def test_explicit_openai_selection_fails_cleanly_without_credentials(self) -> None:
         with patch.dict(os.environ, {"LLM_PROVIDER": "openai"}, clear=False):
