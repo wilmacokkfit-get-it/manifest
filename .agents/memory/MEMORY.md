@@ -3,3 +3,4 @@
 - [Private image delivery](private-image-delivery.md) — prefer per-request creator checks over bearer-style signed URLs for unreleased renders.
 - [Limited refinement](limited-refinement.md) — the creator wants one optional context response after the first result, not an ongoing chat.
 - [Recovery fencing](recovery-fencing.md) — second-resolution timestamps are not sufficient to distinguish competing work claims.
+- [Render cleanup safety](render-cleanup-safety.md) — automatic deletion needs retirement fencing; database checks and Storage deletion are not atomic.

@@ -152,6 +152,9 @@ For the opt-in, disposable live Supabase image-privacy check, see
 [the integration check guide](docs/supabase-image-privacy.md). Ordinary tests
 do not contact real Supabase Storage.
 
+For the manual, reviewed cleanup of an abandoned render attempt, see the
+[render-attempt cleanup operator guide](docs/render-attempt-cleanup.md).
+
 Run regression tests with `python -m unittest discover -s tests -v`.
 The storage-policy audit tests require PostgreSQL server/client tools (`initdb`,
 `pg_ctl`, and `psql`) on PATH; Replit's system dependencies include PostgreSQL.
