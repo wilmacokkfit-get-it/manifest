@@ -1,1 +1,2 @@
 - [Python hook environment](python-hook-environment.md) — system pip and sysconfig can resolve to immutable Nix paths even when the project-local Python launcher is active.
+- [Supabase validation boundaries](supabase-validation.md) — successful Storage authentication does not prove access to database tables; validate both before switching backends.

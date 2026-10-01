@@ -21,7 +21,7 @@ IMAGE_MODEL = "gpt-image-1"
 IMAGE_PROVIDER = "openai"
 LLM_MODEL = "gpt-5-mini"
 LLM_PROVIDER = "openai"
-STORE = "sqlite"
+STORE = "supabase"
 
 [workflows]
 runButton = "Project"

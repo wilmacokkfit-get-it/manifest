@@ -21,8 +21,10 @@ _IMPORT_DATA = tempfile.TemporaryDirectory(prefix="manifest-test-import-")
 _IMPORT_ENV = patch.dict(
     os.environ,
     {
+        "STORE": "sqlite",
         "MANIFEST_DATA_DIR": _IMPORT_DATA.name,
         "SUPABASE_URL": "",
+        "SUPABASE_SECRET_KEY": "",
         "SUPABASE_SERVICE_ROLE_KEY": "",
         "TRUST_VISITOR_HEADER": "0",
     },

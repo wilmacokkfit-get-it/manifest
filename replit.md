@@ -1,6 +1,6 @@
 # Running MANIFEST on Replit
 
-This imported project keeps its original FastAPI backend, vanilla HTML/CSS/JS frontend, and SQLite storage. No frontend build is required.
+This imported project keeps its original FastAPI backend, vanilla HTML/CSS/JS frontend, and existing SQLite/Supabase storage adapters. No frontend build is required. The active backend is Supabase (`STORE=supabase`); existing local SQLite data has not been moved or deleted.
 
 - Click Run to start the `Start application` workflow.
 - Command: `python -m uvicorn server:app --host 0.0.0.0 --port 5000`.
@@ -26,6 +26,6 @@ The imported deployment command still serves port 8000. This setup only configur
 
 Use `SUPABASE_URL` and `SUPABASE_SECRET_KEY` in Secrets. Legacy `SUPABASE_SERVICE_ROLE_KEY` is also supported. Modern secret keys are sent only as `apikey`, not as JWT bearer tokens. Bare Supabase project hostnames are normalized to HTTPS.
 
-Run the full `supabase/migration.sql` in Supabase's SQL Editor, including its final grants to `service_role`. RLS bypass does not replace SQL table privileges.
+Run the full `supabase/migration.sql` in Supabase's SQL Editor, including its final grants to `service_role`. RLS bypass does not replace SQL table privileges. Database read/write access and image upload/retrieval have been verified with temporary records that were removed after verification.
 
 `STORE=sqlite` keeps local data in use even when Supabase secrets exist. Set `STORE=supabase` after verifying the database permissions; missing secrets fail explicitly. The default `STORE=auto` selects Supabase when its settings exist, otherwise SQLite. Switching backends does not migrate or delete existing SQLite ventures or images.
