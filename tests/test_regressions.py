@@ -241,6 +241,38 @@ class ServerRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["images_status"], "failed")
         self.assertEqual(updated["images"], [None])
 
+    async def test_image_generation_success_saves_render_and_marks_ready(self) -> None:
+        row = await self.store.create_venture(
+            {**private_venture(slug="image-success"), "image_prompts": ["test render"]}
+        )
+
+        from PIL import Image
+
+        png = BytesIO()
+        Image.new("RGB", (4, 4), color=(90, 120, 150)).save(png, format="PNG")
+        png_bytes = png.getvalue()
+        calls: list[tuple[str, str]] = []
+
+        async def stub_render(prompt: str, accent: str) -> bytes:
+            calls.append((prompt, accent))
+            return png_bytes
+
+        with patch.object(server.llm, "generate_render", stub_render):
+            await server._render_images(row)
+
+        self.assertEqual(calls, [("test render", "#aabbcc")])
+
+        updated = await self.store.get_by_id(row["id"])
+        self.assertEqual(updated["images_status"], "ready")
+        self.assertEqual(len(updated["images"]), 1)
+        render_url = updated["images"][0]
+        self.assertTrue(render_url.startswith("/renders/"))
+        self.assertTrue(Path(render_url).name.startswith(f"{row['id']}-0."))
+        render_path = self.store.renders_dir / Path(render_url).name
+        self.assertTrue(render_path.is_file())
+        self.assertGreater(render_path.stat().st_size, 0)
+        self.assertEqual(updated["visibility"], "private")
+
     async def test_sqlite_round_trip_update_and_render_file(self) -> None:
         row = await self.store.create_venture(private_venture(slug="sqlite-round-trip"))
 
