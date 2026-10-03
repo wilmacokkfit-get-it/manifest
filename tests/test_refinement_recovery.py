@@ -35,13 +35,9 @@ class SQLiteRestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.store = SQLiteStore(self.tempdir.name)
         self.original_store = server.store
         server.store = self.store
-        self.original_rate = server._check_rate
-        server._hits.clear()
 
     async def asyncTearDown(self) -> None:
         server.store = self.original_store
-        server._check_rate = self.original_rate
-        server._hits.clear()
         self.store._db.close()
         self.tempdir.cleanup()
 

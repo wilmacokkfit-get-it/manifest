@@ -1,5 +1,6 @@
 -- MANIFEST v2 — Supabase schema
 -- Run once in the Supabase SQL editor (or via `supabase db push`).
+-- Then run supabase/generation-admission.sql for atomic generation quotas.
 -- The server talks to these tables with the SERVICE ROLE key only; RLS is on and
 -- there are deliberately no anon policies, so nothing is readable from the browser.
 

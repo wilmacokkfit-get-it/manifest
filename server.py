@@ -134,11 +134,8 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 # ---------------------------------------------------------------------------
-# Rate limiting (per visitor, in memory) + global daily cap (in the store)
+# Generation admission (durable visitor quotas and global in-flight capacity)
 # ---------------------------------------------------------------------------
-
-_hits: dict[str, deque] = defaultdict(deque)
-
 
 def _caller_id(request: Request) -> str:
     vid = request.headers.get("x-visitor-id")
@@ -149,20 +146,34 @@ def _caller_id(request: Request) -> str:
     return f"ip:{ip}"
 
 
-def _check_rate(caller: str) -> None:
-    now = time.time()
-    q = _hits[caller]
-    while q and now - q[0] > 86400:
-        q.popleft()
-    last_hour = sum(1 for t in q if now - t < 3600)
-    if last_hour >= GEN_PER_HOUR:
-        raise HTTPException(429, "You've manifested a lot in the last hour. Give the engine a moment.")
-    if len(q) >= GEN_PER_DAY:
-        raise HTTPException(429, "That's your ventures for today. Come back tomorrow.")
+async def _release_admission(token: str | None) -> None:
+    if token:
+        try:
+            await _shielded_bounded_call(store.release_generation(token))
+        except Exception as exc:
+            # A lost cleanup response is safe: the pending lease expires.
+            print(f"[admission] cleanup failed: {exc}")
 
 
-def _record_hit(caller: str) -> None:
-    _hits[caller].append(time.time())
+async def _reserve_admission(caller: str, *, global_slot: bool) -> str:
+    token = new_token()
+    try:
+        reason = await _shielded_bounded_call(store.reserve_generation(
+            token, caller, GEN_PER_HOUR, GEN_PER_DAY, GLOBAL_PER_DAY if global_slot else None))
+        messages = {
+            "hour": "You've manifested a lot in the last hour. Give the engine a moment.",
+            "day": "That's your ventures for today. Come back tomorrow.",
+            "global": "The engine has reached today's capacity. It resets at midnight UTC.",
+        }
+        if reason is not None:
+            if reason not in messages:
+                raise RuntimeError("Unknown generation admission response.")
+            raise HTTPException(429, messages[reason])
+        return token
+    except BaseException:
+        # Token known before acquisition, including an ambiguous network commit.
+        await _release_admission(token)
+        raise
 
 
 async def _shielded_bounded_call(awaitable, timeout: float = 35):
@@ -440,35 +451,34 @@ async def manifest(body: ManifestBody, request: Request):
             raise HTTPException(422, "Choose an unchanged concept from this mix, or submit your own sentence without a mix.")
     caller = _caller_id(request)
     unlimited = await is_app_owner(request)
-    if not unlimited:
-        _check_rate(caller)
-        if await store.count_generations_since(day_start_iso()) >= GLOBAL_PER_DAY:
-            raise HTTPException(429, "The engine has reached today's capacity. It resets at midnight UTC.")
     owner = _owner_token(request)
     created_at = now_iso()
     prov = mint(idea, created_at, owner)
-    avoid = [] if chosen else await store.recent_concepts(owner)
     angle = random.choice(llm.ANGLES)
     if chosen:
         angle = ("Preserve this selected hybrid's exact product, buyer and borrowed mechanisms. "
                  "Do not reinterpret it as an unrelated venture. Concept: " + json.dumps(chosen, ensure_ascii=False))
+    admission = None if unlimited else await _reserve_admission(caller, global_slot=True)
 
     async def gen():
-        yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at})
         buf = ""
         last_emit = 0.0
         last_key = None
         try:
-            stream_options = {"angle": angle, "avoid": avoid}
-            if chosen:
-                stream_options["preserve"] = True
-            async for chunk in llm.stream_venture_text(idea, **stream_options):
-                buf += chunk
-                now = time.time()
-                obj, key = parse_partial(buf)
-                if obj and (now - last_emit > 0.07 or key != last_key):
-                    last_emit, last_key = now, key
-                    yield _sse("partial", {"data": obj, "streaming": key})
+            yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at})
+            # A bounded worker cannot outlive its five-minute database lease.
+            with anyio.fail_after(120):
+                avoid = [] if chosen else await store.recent_concepts(owner)
+                stream_options = {"angle": angle, "avoid": avoid}
+                if chosen:
+                    stream_options["preserve"] = True
+                async for chunk in llm.stream_venture_text(idea, **stream_options):
+                    buf += chunk
+                    now = time.time()
+                    obj, key = parse_partial(buf)
+                    if obj and (now - last_emit > 0.07 or key != last_key):
+                        last_emit, last_key = now, key
+                        yield _sse("partial", {"data": obj, "streaming": key})
             obj, _ = parse_partial(buf)
             if not obj or not obj.get("name"):
                 raise RuntimeError("The engine returned nothing usable.")
@@ -481,9 +491,8 @@ async def manifest(body: ManifestBody, request: Request):
                 "images": [], "images_status": "pending" if (llm.image_provider() != "none" and data["image_prompts"]) else "failed",
                 "visibility": "private", "status": "ready",
             }
-            saved = await store.create_venture(row)
-            if not unlimited:
-                _record_hit(caller)  # only successful visitor births count against the limit
+            saved = await _shielded_bounded_call(
+                store.create_reserved_venture(admission, row) if admission else store.create_venture(row))
             if saved["images_status"] == "pending":
                 asyncio.create_task(_render_images(saved))
             yield _sse("done", _public_view(saved, is_owner=True, unlimited=unlimited))
@@ -491,6 +500,10 @@ async def manifest(body: ManifestBody, request: Request):
             yield _sse("error", {"message": e.detail})
         except Exception as e:  # noqa: BLE001
             yield _sse("error", {"message": f"The engine stalled: {str(e)[:200]}"})
+        finally:
+            # Only pending entries are released; a successful atomic commit is
+            # never refunded even if the client disconnects before seeing done.
+            await _release_admission(admission)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -671,8 +684,7 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
         raise HTTPException(400, "Context must be between 1 and 1000 characters.")
     caller = _caller_id(request)
     unlimited = await is_app_owner(request)
-    if not unlimited:
-        _check_rate(caller)
+    admission = None if unlimited else await _reserve_admission(caller, global_slot=False)
     original_grounding = dict(v.get("grounding") or {})
     claim_id = new_token()
     completed = False
@@ -687,8 +699,9 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
         if not claimed:
             raise HTTPException(409, "This venture is not available for refinement.")
         v = claimed
-        if not unlimited:
-            _record_hit(caller)
+        if admission:
+            # Preserve the existing charge-on-start refinement policy.
+            await _shielded_bounded_call(store.consume_refinement_admission(admission))
 
         buf = ""
         with anyio.fail_after(120):
@@ -730,6 +743,7 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"Refinement failed: {str(exc)[:200]}") from exc
     finally:
+        await _release_admission(admission)
         if not completed:
             try:
                 await _shielded_bounded_call(

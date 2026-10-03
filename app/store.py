@@ -20,6 +20,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -235,6 +236,17 @@ class SQLiteStore(RenderAccess):
                   readings TEXT,
                   generated_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS generation_admissions (
+                  token TEXT PRIMARY KEY,
+                  caller TEXT NOT NULL,
+                  global_slot INTEGER NOT NULL,
+                  admitted_at REAL NOT NULL,
+                  expires_at REAL NOT NULL,
+                  consumed INTEGER NOT NULL DEFAULT 0,
+                  venture_id TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_admissions_caller
+                  ON generation_admissions(caller, admitted_at);
                 """
             )
             cols = {r[1] for r in self._db.execute("PRAGMA table_info(ventures)").fetchall()}
@@ -266,6 +278,94 @@ class SQLiteStore(RenderAccess):
         return out
 
     # -- ventures -----------------------------------------------------------
+    async def reserve_generation(self, token: str, caller: str, hour_cap: int,
+                                 day_cap: int, global_cap: int | None) -> str | None:
+        """Serialize admission across connections/processes, not just this instance."""
+        with self._lock:
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                now = time.time()
+                self._db.execute(
+                    "DELETE FROM generation_admissions WHERE "
+                    "(consumed = 0 AND expires_at <= ?) OR "
+                    "(consumed = 1 AND admitted_at <= ?)", (now, now - 86400))
+                hour, day = self._db.execute(
+                    "SELECT COALESCE(SUM(admitted_at > ?), 0), COUNT(*) "
+                    "FROM generation_admissions WHERE caller = ?",
+                    (now - 3600, caller)).fetchone()
+                reason = "hour" if hour >= hour_cap else "day" if day >= day_cap else None
+                if reason is None and global_cap is not None:
+                    midnight = datetime.now(timezone.utc).replace(
+                        hour=0, minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
+                    births = self._db.execute(
+                        "SELECT COUNT(*) FROM ventures v WHERE created_at >= ? "
+                        "AND NOT EXISTS (SELECT 1 FROM generation_admissions a "
+                        "WHERE a.venture_id = v.id AND a.consumed = 1 AND a.global_slot = 1)",
+                        (midnight,)).fetchone()[0]
+                    reserved = self._db.execute(
+                        "SELECT COUNT(*) FROM generation_admissions "
+                        "WHERE global_slot = 1 AND (consumed = 0 OR admitted_at >= ?)",
+                        (datetime.fromisoformat(midnight.replace("Z", "+00:00")).timestamp(),)).fetchone()[0]
+                    if births + reserved >= global_cap:
+                        reason = "global"
+                if reason is None:
+                    self._db.execute(
+                        "INSERT INTO generation_admissions "
+                        "(token, caller, global_slot, admitted_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                        (token, caller, int(global_cap is not None), now, now + WORK_LEASE_SECONDS))
+                self._db.commit()
+                return reason
+            except BaseException:
+                self._db.rollback()
+                raise
+
+    async def release_generation(self, token: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "DELETE FROM generation_admissions WHERE token = ? AND consumed = 0", (token,))
+            self._db.commit()
+
+    async def consume_refinement_admission(self, token: str) -> None:
+        with self._lock:
+            cursor = self._db.execute(
+                "UPDATE generation_admissions SET consumed = 1, admitted_at = ? "
+                "WHERE token = ? AND global_slot = 0 AND consumed = 0 AND expires_at > ?",
+                (time.time(), token, time.time()))
+            self._db.commit()
+            if cursor.rowcount != 1:
+                raise RuntimeError("Refinement admission expired.")
+
+    async def create_reserved_venture(self, token: str, row: dict) -> dict:
+        row = dict(row)
+        row.setdefault("id", _new_id())
+        row.setdefault("created_at", now_iso())
+        row["updated_at"] = row["created_at"]
+        enc = self._encode(row)
+        with self._lock:
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                admission = self._db.execute(
+                    "SELECT * FROM generation_admissions WHERE token = ?", (token,)).fetchone()
+                if admission and admission["consumed"] and admission["venture_id"]:
+                    saved = self._db.execute(
+                        "SELECT * FROM ventures WHERE id = ?", (admission["venture_id"],)).fetchone()
+                else:
+                    if (not admission or admission["consumed"] or not admission["global_slot"]
+                            or admission["expires_at"] <= time.time()):
+                        raise RuntimeError("Generation admission expired.")
+                    self._db.execute(
+                        f"INSERT INTO ventures ({', '.join(enc)}) VALUES ({', '.join('?' for _ in enc)})",
+                        list(enc.values()))
+                    self._db.execute(
+                        "UPDATE generation_admissions SET consumed = 1, venture_id = ?, admitted_at = ? "
+                        "WHERE token = ?", (row["id"], time.time(), token))
+                    saved = self._db.execute("SELECT * FROM ventures WHERE id = ?", (row["id"],)).fetchone()
+                self._db.commit()
+                return self._row_to_dict(saved)
+            except BaseException:
+                self._db.rollback()
+                raise
+
     async def create_venture(self, row: dict) -> dict:
         row = dict(row)
         row.setdefault("id", _new_id())
@@ -785,6 +885,29 @@ class SupabaseStore(RenderAccess):
         if r.status_code == 204 or not r.text:
             return None
         return r.json()
+
+    async def reserve_generation(self, token: str, caller: str, hour_cap: int,
+                                 day_cap: int, global_cap: int | None) -> str | None:
+        return await self._rest("POST", "rpc/reserve_generation", json_body={
+            "p_token": token, "p_caller": caller, "p_hour_cap": hour_cap,
+            "p_day_cap": day_cap, "p_global_cap": global_cap,
+        })
+
+    async def release_generation(self, token: str) -> None:
+        await self._rest("POST", "rpc/release_generation", json_body={"p_token": token})
+
+    async def consume_refinement_admission(self, token: str) -> None:
+        await self._rest("POST", "rpc/consume_refinement_admission", json_body={"p_token": token})
+
+    async def create_reserved_venture(self, token: str, row: dict) -> dict:
+        row = dict(row)
+        row.setdefault("id", _new_id())
+        row.setdefault("created_at", now_iso())
+        row["updated_at"] = row["created_at"]
+        saved = await self._rest("POST", "rpc/create_reserved_venture",
+                                 json_body={"p_token": token, "p_row": row})
+        self._slug_cache.add(saved["slug"])
+        return saved
 
     async def create_venture(self, row: dict) -> dict:
         row = dict(row)

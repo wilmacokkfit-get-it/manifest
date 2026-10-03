@@ -302,7 +302,6 @@ class MixRouteTests(unittest.IsolatedAsyncioTestCase):
         server._MIX_SNAPSHOTS.clear()
         server._MIX_HITS.clear()
         server._MIX_GLOBAL.clear()
-        server._hits.clear()
         self.env_patch = patch.dict(
             os.environ,
             {"LLM_PROVIDER": "mock", "IMAGE_PROVIDER": "none"},
@@ -317,7 +316,6 @@ class MixRouteTests(unittest.IsolatedAsyncioTestCase):
         server._MIX_SNAPSHOTS.clear()
         server._MIX_HITS.clear()
         server._MIX_GLOBAL.clear()
-        server._hits.clear()
         self.store._db.close()
         self.tempdir.cleanup()
 
@@ -571,24 +569,19 @@ class MixRouteTests(unittest.IsolatedAsyncioTestCase):
         caller = "203.0.113.51"
         with patch.object(server, "is_app_owner", new=AsyncMock(return_value=False)), patch.object(
             server.llm, "stream_venture_text", new=stub_stream
-        ), patch.object(server.llm, "image_provider", return_value="none"), patch.object(
-            server.store, "count_generations_since", new=AsyncMock(return_value=0)
-        ):
+        ), patch.object(server.llm, "image_provider", return_value="none"):
             async with self.client() as client:
                 # Mix-selected generations remain subject to the visitor/hour limit.
-                server._hits[f"ip:{caller}"].extend([time.time()] * server.GEN_PER_HOUR)
-                hourly = await client.post(
-                    "/api/manifest", headers=self.headers(owner, caller), json=request_body,
-                )
+                with patch.object(server, "GEN_PER_HOUR", 0):
+                    hourly = await client.post(
+                        "/api/manifest", headers=self.headers(owner, caller), json=request_body,
+                    )
                 self.assertEqual(hourly.status_code, 429)
                 self.assertEqual(captured, [])
 
-                server._hits.clear()
                 # They also remain subject to the original global daily generation cap.
                 with patch.object(
-                    server.store,
-                    "count_generations_since",
-                    new=AsyncMock(return_value=server.GLOBAL_PER_DAY),
+                    server, "GLOBAL_PER_DAY", 0,
                 ):
                     global_cap = await client.post(
                         "/api/manifest", headers=self.headers(owner, caller), json=request_body,

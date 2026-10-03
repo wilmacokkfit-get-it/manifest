@@ -23,12 +23,10 @@ class OwnerLimitsTests(unittest.IsolatedAsyncioTestCase):
             "MANIFEST_OWNER_EMAIL": "", "TRUST_VISITOR_HEADER": "0",
         })
         self.env.start()
-        server._hits.clear()
 
     async def asyncTearDown(self):
         self.env.stop()
         self.store_patch.stop()
-        server._hits.clear()
         self.store._db.close()
         self.tempdir.cleanup()
 
@@ -53,14 +51,14 @@ class OwnerLimitsTests(unittest.IsolatedAsyncioTestCase):
             patch.object(server, "GEN_PER_DAY", 0),
             patch.object(server, "GLOBAL_PER_DAY", 0),
             patch.object(server.llm, "stream_venture_text", output),
-            patch.object(self.store, "count_generations_since", AsyncMock()) as count,
+            patch.object(self.store, "reserve_generation", AsyncMock()) as reserve,
         ):
             async with self.client() as client:
                 response = await client.post("/api/manifest", json={"idea": "A compact wall rail for tiny workshops"})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn("event: done", response.text)
-        count.assert_not_awaited()
-        self.assertFalse(any(server._hits.values()))
+        reserve.assert_not_awaited()
+        self.assertEqual(self.store._db.execute("SELECT COUNT(*) FROM generation_admissions").fetchone()[0], 0)
 
     async def test_visitor_generation_keeps_hour_day_and_global_caps(self):
         for hour, day, global_cap in ((0, 8, 150), (3, 0, 150), (3, 8, 0)):
@@ -97,7 +95,7 @@ class OwnerLimitsTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(response.status_code, 200, response.text)
                         self.assertTrue(response.json()["refinement"]["unlimited"])
                         self.assertEqual(response.json()["refinement"]["state"], "completed")
-            self.assertFalse(any(server._hits.values()))
+            self.assertEqual(self.store._db.execute("SELECT COUNT(*) FROM generation_admissions").fetchone()[0], 0)
 
     async def test_normal_creator_still_gets_one_refinement(self):
         async def output(*args, **kwargs):

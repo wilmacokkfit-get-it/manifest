@@ -74,7 +74,6 @@ class ServerRegressionTests(unittest.IsolatedAsyncioTestCase):
         self._original_trust_visitor_header = server.TRUST_VISITOR_HEADER
         server.store = self.store
         server.TRUST_VISITOR_HEADER = False
-        server._hits.clear()
         self._env_patch = patch.dict(
             os.environ,
             {"LLM_PROVIDER": "mock", "IMAGE_PROVIDER": "none"},
@@ -86,7 +85,6 @@ class ServerRegressionTests(unittest.IsolatedAsyncioTestCase):
         self._env_patch.stop()
         server.store = self._original_store
         server.TRUST_VISITOR_HEADER = self._original_trust_visitor_header
-        server._hits.clear()
         self.store._db.close()
         self._tempdir.cleanup()
 

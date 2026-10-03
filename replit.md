@@ -28,6 +28,8 @@ Use `SUPABASE_URL` and `SUPABASE_SECRET_KEY` in Secrets. Legacy `SUPABASE_SERVIC
 
 Run the full `supabase/migration.sql` in Supabase's SQL Editor, including its final grants to `service_role`. RLS bypass does not replace SQL table privileges. Database read/write access and image upload/retrieval have been verified with temporary records that were removed after verification.
 
+Generation quotas additionally require `supabase/generation-admission.sql` after the base migration. Apply it explicitly to the target Supabase project; startup does not migrate remote databases. Without these backend-only RPCs, ordinary generation/refinement fail closed. See `docs/generation-admission.md` for reservation counting and crash/cancellation semantics.
+
 `STORE=sqlite` keeps local data in use even when Supabase secrets exist. Set `STORE=supabase` after verifying the database permissions; missing secrets fail explicitly. The default `STORE=auto` selects Supabase when its settings exist, otherwise SQLite. Switching backends does not migrate or delete existing SQLite ventures or images.
 
 ## Image privacy
