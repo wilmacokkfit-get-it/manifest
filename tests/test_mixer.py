@@ -320,8 +320,14 @@ class MixRouteTests(unittest.IsolatedAsyncioTestCase):
         self.tempdir.cleanup()
 
     def client(self) -> httpx.AsyncClient:
+        # Model forwarding from a trusted local proxy, not raw application headers.
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
         return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=server.app),
+            transport=httpx.ASGITransport(
+                app=ProxyHeadersMiddleware(server.app, trusted_hosts=["127.0.0.1"]),
+                client=("127.0.0.1", 1234),
+            ),
             base_url="http://testserver",
         )
 

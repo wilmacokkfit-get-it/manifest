@@ -52,8 +52,10 @@ SQLite creates its reservation table automatically in the existing local file.
 - If a cleanup fails, capacity can remain occupied until the lease expires.
   Failures are logged; there is no unsafe refund of uncertain successful work.
 - A stream that is never started also recovers by lease expiry.
-- Visitor identification is unchanged. Quotas are shared across processes for
-  the same caller identity, not a guarantee against changing identities.
+- Quotas are shared across processes for the same caller identity. Caller
+  identity uses the ASGI client address resolved by Uvicorn, not raw request
+  headers. See [caller identity](caller-identity.md) for the proxy trust boundary.
+  This is still not a guarantee against changing networks.
 
 ## Disposable validation
 

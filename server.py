@@ -78,11 +78,9 @@ ANTHROPIC_KEY_VAR = "CUSTOM_CRED_API_ANTHROPIC_COM_PROXY_AUTH_KEY"
 OPENAI_URL_VAR = "CUSTOM_CRED_API_OPENAI_COM_URL"
 OPENAI_KEY_VAR = "CUSTOM_CRED_API_OPENAI_COM_PROXY_AUTH_KEY"
 _wire_credentials()
-# The preview iframe cannot hold cookies, so its proxy sends a stable X-Visitor-Id. That header is only
-# trusted in the dev sandbox / preview. Once published (credentials injected), the client could set it, so
-# identity comes from the __Host- cookie alone.
-PUBLISHED = bool(os.environ.get(ANTHROPIC_KEY_VAR) or os.environ.get(OPENAI_KEY_VAR))
-TRUST_VISITOR_HEADER = os.environ.get("TRUST_VISITOR_HEADER", "0") == "1" and not PUBLISHED
+# Legacy compatibility flag for local fixtures; the environment opt-in is no longer honored.
+# Replit preview passes client-supplied X-Visitor-Id through, so it is not an identity credential.
+TRUST_VISITOR_HEADER = False
 
 from app import llm  # noqa: E402
 from app import architect as arch  # noqa: E402
@@ -138,11 +136,9 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # ---------------------------------------------------------------------------
 
 def _caller_id(request: Request) -> str:
-    vid = request.headers.get("x-visitor-id")
-    if vid and TRUST_VISITOR_HEADER:
-        return f"v:{vid}"
-    fwd = request.headers.get("x-forwarded-for")
-    ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
+    # Uvicorn resolves forwarded addresses only for configured trusted peers,
+    # walking the chain from the right. Never re-read a client-controlled prefix.
+    ip = request.client.host if request.client else "unknown"
     return f"ip:{ip}"
 
 
@@ -205,22 +201,16 @@ COOKIE = "__Host-manifest_owner"
 
 
 def _owner_token(request: Request) -> str:
-    """Who is this? Prefer the hosting proxy's stable visitor id, then our own
-    first-party cookie (set by the middleware below), never anything the page
-    can forge from JavaScript."""
+    """Use the verified app-owner account, otherwise the first-party creator cookie."""
     authenticated_token = getattr(request.state, "app_owner_token", None)
     if authenticated_token:
         return authenticated_token
-    if TRUST_VISITOR_HEADER and request.headers.get("x-visitor-id"):
-        return request.headers["x-visitor-id"]
     return request.state.owner
 
 
 def _is_creator(request: Request, venture: dict) -> bool:
     """An owner account also keeps access to its pre-login browser's ventures."""
     tokens = {_owner_token(request), getattr(request.state, "owner", None)}
-    if TRUST_VISITOR_HEADER:
-        tokens.add(request.headers.get("x-visitor-id"))
     return bool(venture.get("owner_token")) and venture["owner_token"] in tokens
 
 
@@ -235,7 +225,7 @@ async def _identity_cookie(request: Request, call_next):
     if request.url.path.startswith(("/api/manifest", "/api/mix/", "/api/ventures/", "/api/venture-images/", "/renders/")):
         request.state.app_owner_token = await app_owner_token(request)
     response = await call_next(request)
-    if fresh and not (TRUST_VISITOR_HEADER and request.headers.get("x-visitor-id")):
+    if fresh:
         response.set_cookie(COOKIE, token, max_age=60 * 60 * 24 * 365 * 2, httponly=True,
                             samesite="lax", secure=True, path="/")
     return response

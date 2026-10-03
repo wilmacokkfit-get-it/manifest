@@ -30,6 +30,8 @@ Run the full `supabase/migration.sql` in Supabase's SQL Editor, including its fi
 
 Generation quotas additionally require `supabase/generation-admission.sql` after the base migration. Apply it explicitly to the target Supabase project; startup does not migrate remote databases. Without these backend-only RPCs, ordinary generation/refinement fail closed. See `docs/generation-admission.md` for reservation counting and crash/cancellation semantics.
 
+Caller quotas use Uvicorn's trusted-proxy client address, never raw visitor/forwarded headers. `TRUST_VISITOR_HEADER=1` is disabled. Keep proxy trust explicit, never `FORWARDED_ALLOW_IPS=*`; the default trusts only loopback and can group users behind an intermediary until its verified proxy chain is configured. See `docs/caller-identity.md` for the preview audit and deployment validation boundary.
+
 `STORE=sqlite` keeps local data in use even when Supabase secrets exist. Set `STORE=supabase` after verifying the database permissions; missing secrets fail explicitly. The default `STORE=auto` selects Supabase when its settings exist, otherwise SQLite. Switching backends does not migrate or delete existing SQLite ventures or images.
 
 ## Image privacy
