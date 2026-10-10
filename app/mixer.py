@@ -125,6 +125,10 @@ For safety-critical changes require qualified review and make the first test a
 nonfunctional mockup or customer test, not a hazardous DIY build.
 Prices and prototype budgets are estimates, never sourced vendor quotations.
 Keep concepts materially different from each other. Explain in everyday language.
+Select for a concrete advantage over the current workaround, not merely a surprising
+pairing. In first_test target the hardest unproven assumption, include a proposed
+measurable pass/fail threshold and a revision if it fails. Test thresholds are
+hypotheses, not observed demand. Prefer tests before tooling, inventory or scale.
 Use only supplied market evidence and actual Floor signals. Floor votes are interest,
 not sales or proof of market demand. If Floor is empty, say no Floor evidence is available.
 Never claim uniqueness, exclusivity, guaranteed demand or patentability.

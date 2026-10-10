@@ -31,20 +31,29 @@ Produce the keys IN THIS EXACT ORDER:
 
 "name": 1-2 words. Brandable, easy to say, not a pun, not a real famous brand. No suffixes like -ify, -ly, AI, Hub, Labs, Pro.
 "tagline": 4-12 words. One clean sentence fragment that makes the product obvious. No cliches.
-"description": 2-3 sentences. What it is, who it is for, and why it beats the current workaround. Concrete nouns.
+"description": 2-3 sentences. What it is, who it is for, the specific mechanism that makes it work, and why it beats the current workaround. Concrete nouns, not adjectives standing in for a mechanism.
 "category": 2-3 words, e.g. "Jobsite tools", "Home irrigation", "Consumer kitchen".
 "accent": one hex color (like "#d9a441") that suits this product. Saturated enough to glow on a near-black background, never white, never gray.
-"tiers": array of exactly 3 objects, in order, with "label" values exactly "The Lean Build", "The Real Product", "The Empire". Each has "title" (2-5 words) and "description" (2 sentences: what gets built at this level, and a rough cost or effort to make it real).
+"tiers": array of exactly 3 objects, in order, with "label" values exactly "The Lean Build", "The Real Product", "The Empire". Each has "title" (2-5 words) and "description" (2 sentences: what gets built at this level, and a rough estimated cost range or effort to make it real). Start with the cheapest useful test, then a repeatable product, then a credible expansion conditional on evidence, not a fantasy empire.
 "roadmap": array of exactly 5 objects {"step": 1..5, "action": imperative sentence of 12 words or fewer, "where": 1-2 sentences naming the specific tools, suppliers, websites, marketplaces, or types of people to use}.
-"grounding": object with three honest, specific sentences:
-   "exists": the closest thing that already exists, named. If something very similar exists, say so plainly.
-   "who_pays": the exact buyer and a realistic price point.
-   "first_hundred": how the first one hundred dollars of revenue would actually happen, step by step in one or two sentences.
+"grounding": object with three honest, specific entries:
+   "exists": the closest existing alternative, named only when confident it exists, and the concrete difference this venture proposes. Label an uncertain comparison unverified; if something very similar exists, say so plainly.
+   "who_pays": the exact buyer, the painful moment that motivates a purchase, and a realistic estimated price point to test, not a claim of proven willingness to pay.
+   "first_hundred": how the first one hundred dollars of revenue could happen, step by step in one or two sentences. Name the outreach channel and show the simple number of purchases times price; revenue is not profit or guaranteed demand.
 "image_prompts": array of exactly 2 strings, each a detailed prompt for a photorealistic product render. No text, logos, or words in the image. [1] the product alone on a dark studio backdrop with soft rim lighting; [2] the product in realistic use by a person in its real environment. Describe form, material, color (use the accent color), scale, and lighting.
 
 If the idea is weak or already exists, still build the best honest version of it and say the truth in grounding. Never flatter.
 
-VARIETY IS MANDATORY. Broad or vague sentences (an industry name, a category, "an app for X", "a money making app") have a hundred possible ventures inside them. Never take the first obvious interpretation. Pick one specific wedge: a specific customer, a specific painful moment in their day, a specific thing they already pay for badly. Where everyone expects software, consider a physical product, a service, a kit, a subscription box, a marketplace, a tool for pros, a franchise, a media brand. If the same sentence were sent twice, the two ventures must be clearly different in customer, form, and name. You will be given an ANGLE to build from and a list of names and concepts to AVOID. Obey both: the angle shapes the venture, and nothing in the avoid list may be reused or lightly reworded."""
+CREATION STANDARD:
+- For open-ended ideas, consider several materially different approaches before selecting one. Prefer a useful, surprising mechanism over a renamed familiar app. Make the difference observable: fewer steps, reduced waste, easier access, a repairable part, or a better incentive. Do not invent a performance number.
+- Preserve the creator's explicit product, buyer, constraints and context. An ANGLE is secondary to that intent. Surprise should improve the solution, not replace the requested problem. Do not bolt on a subscription, AI, a marketplace or custom electronics merely to satisfy an angle; each must solve a demonstrated recurring need or necessary function. Repairability is not a reason to ship unnecessary monthly parts.
+- Find the hardest unproven assumption: buyer behavior, technical feasibility, access to supply, or unit economics. The FIRST roadmap step must test it cheaply and safely before a functional prototype, tooling, inventory or scaling, unless the creator supplied evidence that it is already resolved. In its "where" entry include a measurable proposed pass/fail criterion and what to change if it fails. Test thresholds are proposals, not market facts.
+- Keep the product, tiers, roadmap, revenue arithmetic and both renders internally consistent. Costs are rough estimates, not vendor quotations. Name tools and suppliers only when confident they exist; otherwise name the supplier type and a useful search phrase.
+- Distinguish a plausible hypothesis from verified evidence. This generation has not performed live market research: do not invent studies, citations, current launch dates, adoption figures or customer traction. Never guarantee novelty, patentability, exclusivity, success or legal ownership.
+- Check physical, operational and regulatory feasibility. For electrical, structural, food-contact, medical or other safety-critical work, name qualified review and start with a nonfunctional mockup or customer test; never prescribe hazardous DIY testing. Put qualified review BEFORE functional construction or testing in the roadmap, not only at the end. Never claim legal compliance or safety certification without verified evidence. Renders illustrate the actual concept, not impossible technology.
+- Be concise and useful. Embed these judgments in the existing fields; do not add scores, extra keys, a reasoning transcript or marketing filler.
+
+VARIETY IS MANDATORY. Broad or vague sentences (an industry name, a category, "an app for X", "a money making app") have a hundred possible ventures inside them. Never take the first obvious interpretation. Pick one specific wedge: a specific customer, a specific painful moment in their day, a specific thing they already pay for badly. Where everyone expects software, consider a physical product, a service, a kit, a subscription box, a marketplace, a tool for pros, a franchise, a media brand. For broad ideas, vary customer, form and name across generations. For explicit product ideas, preserve the requested product and vary only unconstrained details. You will be given an ANGLE to build from and a list of names and concepts to AVOID. Use the angle where compatible with the creator's explicit intent, and avoid duplicating prior names or lightly rewording their concepts."""
 
 ANGLES = [
     "a physical product you can hold, not software",
@@ -68,7 +77,12 @@ ANGLES = [
 def build_user_message(idea: str, angle: str | None, avoid: list[dict] | None) -> str:
     parts = [f"The sentence:\n\n{idea}"]
     if angle:
-        parts.append(f"ANGLE to build from: {angle}.")
+        parts.append(
+            f"Optional ANGLE for exploring broad ideas: {angle}.\n"
+            "Ignore this angle wherever it conflicts with the sentence's explicit product, "
+            "buyer or constraints, or would add an unnecessary business model. "
+            "The creator's intent takes priority."
+        )
     if avoid:
         lines = "\n".join(f"- {a.get('name')}: {a.get('tagline') or ''}".rstrip(": ") for a in avoid if a.get("name"))
         parts.append("AVOID. These ventures already exist for this creator. Do not reuse or lightly reword their names, taglines, or core concepts:\n" + lines)
@@ -163,7 +177,7 @@ async def stream_refinement_text(venture: dict, context: str) -> AsyncIterator[s
 
         client = AsyncOpenAI()
         model = os.environ.get("LLM_MODEL", "gpt-5-mini")
-        kwargs = {"reasoning": {"effort": "low"}} if model.startswith("gpt-5") else {}
+        kwargs = {"reasoning": {"effort": "medium"}} if model.startswith("gpt-5") else {}
         stream = await client.responses.create(
             model=model, instructions=REFINEMENT_SYSTEM_PROMPT, input=msg, stream=True, **kwargs,
         )
@@ -211,7 +225,7 @@ async def _stream_openai(msg: str, system: str = SYSTEM_PROMPT) -> AsyncIterator
 
     client = AsyncOpenAI()
     model = os.environ.get("LLM_MODEL", "gpt-5-mini")
-    kwargs = {"reasoning": {"effort": "low"}} if model.startswith("gpt-5") else {}
+    kwargs = {"reasoning": {"effort": "medium"}} if model.startswith("gpt-5") else {}
     stream = await client.responses.create(
         model=model,
         instructions=system,
@@ -339,6 +353,15 @@ You return ONE JSON object and nothing else. No prose, no code fences. Plain, sp
 
 Rules for honesty: name real, well-known companies, marketplaces, and tools only when you are confident they exist and do this kind of work. When unsure, describe the TYPE of supplier and give a search phrase instead of inventing a name. Never invent prices for specific vendors; give rough ranges and say they are rough.
 
+BUILD STANDARD: Respect the selected tier's scope and resources. Test the hardest
+unproven assumption before expensive tooling, inventory or scale. Include a
+small, measurable proposed pass/fail criterion in the relevant "done_when" and
+explain what to revise if it fails in "how". Customer compliments are not paid
+demand. Separate revenue from profit and include ongoing costs where relevant.
+Do not treat earlier generated assumptions as verified facts. For safety-critical
+products require qualified review before functional tests; the first move can
+be a nonfunctional mockup or buyer interview, never hazardous DIY work.
+
 Produce the keys IN THIS EXACT ORDER:
 
 "first_move": one sentence. The single thing to do tonight, in under an hour, with what they already have.
@@ -384,7 +407,7 @@ async def stream_path_text(venture: dict, tier_index: int) -> AsyncIterator[str]
         from openai import AsyncOpenAI
         client = AsyncOpenAI()
         model = os.environ.get("LLM_MODEL", "gpt-5-mini")
-        kwargs = {"reasoning": {"effort": "low"}} if model.startswith("gpt-5") else {}
+        kwargs = {"reasoning": {"effort": "medium"}} if model.startswith("gpt-5") else {}
         stream = await client.responses.create(model=model, instructions=PATH_SYSTEM_PROMPT, input=msg, stream=True, **kwargs)
         async for event in stream:
             if getattr(event, "type", "") == "response.output_text.delta":

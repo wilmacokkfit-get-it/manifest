@@ -8,3 +8,4 @@
 - [Trend mixing intent](trend-mixing-intent.md) — combine live public evidence with released Floor ventures; preserve chosen mechanisms without promising novelty.
 - [Quota time and provenance](quota-time-provenance.md) — quota rollover must not rewrite the original minting timestamp; completion-day capacity is distinct from provenance.
 - [Proxy identity trust](proxy-identity-trust.md) — preview observations are not a production proxy contract; visitor headers are not authenticated identity.
+- [Creation direction](creation-direction.md) — subtly ethereal presentation and smarter ideas; surprise must improve explicit intent, not replace it.
