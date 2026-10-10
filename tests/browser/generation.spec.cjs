@@ -1,5 +1,46 @@
 const { test, expect } = require('./generation.fixture.cjs');
 
+for (const accept of [false, true]) {
+  test(`legacy pending attempt: ${accept ? 'confirmed dismissal allows a separate manual attempt' : 'cancel preserves the pending attempt'}`, async ({ page, harness }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => {
+      localStorage.setItem('manifest.pending-request.v1', JSON.stringify({
+        request_id: 'legacy-fixture', idea: 'New drip irrigation line', mix_id: null, legacy: true,
+      }));
+      localStorage.setItem('unrelated-access-setting', 'keep');
+      document.cookie = 'test_creator_access=keep; path=/';
+    });
+    await page.reload();
+    const dismiss = page.getByRole('button', { name: 'Dismiss this old pending attempt' });
+    await expect(dismiss).toBeVisible();
+    expect(await page.evaluate(() => window.__synthetic.requests.length)).toBe(0);
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('duplicate');
+      expect(dialog.message()).toContain('generation allowance');
+      if (accept) await dialog.accept(); else await dialog.dismiss();
+    });
+    await dismiss.click();
+    expect(await page.evaluate(() => window.__synthetic.requests.length)).toBe(0);
+    expect(await page.evaluate(() => localStorage.getItem('unrelated-access-setting'))).toBe('keep');
+    expect(await page.evaluate(() => document.cookie)).toContain('test_creator_access=keep');
+    if (!accept) {
+      expect(await page.evaluate(() => JSON.parse(localStorage.getItem('manifest.pending-request.v1')).request_id)).toBe('legacy-fixture');
+      await expect(dismiss).toBeVisible();
+    } else {
+      expect(await page.evaluate(() => localStorage.getItem('manifest.pending-request.v1'))).toBeNull();
+      await expect(page.locator('#hero-error')).toContainText('No new request has been sent');
+      await page.getByRole('button', { name: 'Manifest it' }).click();
+      await expect.poll(() => page.evaluate(() => window.__synthetic.requests.length)).toBe(1);
+      const pending = await page.evaluate(() => JSON.parse(localStorage.getItem('manifest.pending-request.v1')));
+      expect(pending.request_id).not.toBe('legacy-fixture');
+      expect(pending.legacy).toBeUndefined();
+      await harness.send('done', harness.venture);
+      await harness.close();
+      await expect(page.locator('.v-name')).toHaveText(harness.venture.name);
+    }
+  });
+}
+
 const status = (page, operation) => page.locator(operation === 'venture' ?
   '#forming-status' : operation === 'path' ? '.path-sub' : '#refinement-status');
 const retry = (page, operation) => operation === 'path' ?

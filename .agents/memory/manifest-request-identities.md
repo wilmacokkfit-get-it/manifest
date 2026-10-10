@@ -28,3 +28,16 @@ request would instead risk generating a second venture after a lost save respons
 
 **How to apply:** Keep identified requests fail-closed and test both pre-migration
 generation and interruption paths without model/image calls or live records.
+
+An old, untracked compatibility attempt may be dismissed only through an explicit
+user confirmation of possible duplicate completion and another allowance charge.
+Dismissal is not proof of failure or cancellation, and must not submit a new attempt.
+Do not extend this browser-only escape to identified requests.
+
+**Why:** Enabling database recovery cannot retroactively identify untracked work.
+Permanently locking the browser strands creators, but silently retrying risks a
+second saved venture. An informed, separate manual attempt preserves that distinction.
+
+**How to apply:** Preserve creator access and saved ventures; remove only the
+acknowledged legacy pending marker. Tracked ambiguous work still needs server-side
+ownership checks and retirement fencing before allowing a replacement.

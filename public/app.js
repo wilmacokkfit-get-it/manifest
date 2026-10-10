@@ -234,6 +234,29 @@
   function clearManifest(requestId) {
     if (pendingManifest()?.request_id === requestId) rememberManifest(null);
   }
+  function dismissLegacyManifest(requestId) {
+    const pending = pendingManifest();
+    if (!pending?.legacy || pending.request_id !== requestId || manifestBusy) return false;
+    if (!window.confirm(
+      'The earlier attempt is unconfirmed, not confirmed failed. It may already have saved a venture or may still finish. Generating again could create a duplicate and use another generation allowance.\n\n' +
+      'Continue only if you accept that risk. This clears only the old pending marker in this browser. It does not delete ventures, clear your creator cookie, cancel server work, or send another request.'
+    )) return false;
+    const current = pendingManifest();
+    if (!current?.legacy || current.request_id !== requestId || manifestBusy) return false;
+    clearManifest(requestId);
+    heroError.textContent = 'Old pending marker dismissed. Your ventures and creator access are unchanged. No new request has been sent. Press Manifest it only when you want to start a new attempt.';
+    return true;
+  }
+  function showLegacyManifestNotice(pending) {
+    heroError.replaceChildren(
+      h('p', { text: 'This earlier attempt has no recovery tracking, so we cannot confirm whether it finished. It will not be resubmitted automatically.' }),
+      h('button', {
+        type: 'button', class: 'btn small', text: 'Dismiss this old pending attempt',
+        onclick: () => dismissLegacyManifest(pending.request_id),
+      }),
+      h('p', { text: 'Dismissing does not cancel the old attempt or delete a saved venture. Generating again may create a duplicate. You will be asked to confirm.' }),
+    );
+  }
   async function reconcileManifest(requestId, attempts = 15) {
     let result = { state: 'unconfirmed' };
     for (let i = 0; i < attempts; i++) {
@@ -276,7 +299,7 @@
       ideaInput.dispatchEvent(new Event('input'));
     }
     if (pending.legacy) {
-      heroError.textContent = 'Automatic recovery was unavailable for this request. Check your ventures before trying again; this request will not be resubmitted.';
+      showLegacyManifestNotice(pending);
       return;
     }
     manifestBusy = true;
@@ -301,8 +324,8 @@
     manifestBusy = true;
     let pending = pendingManifest();
     if (pending?.legacy) {
-      heroError.textContent = 'This earlier request is unconfirmed and cannot be automatically recovered. Check your ventures before trying again; no second request has been sent.';
       manifestBusy = false;
+      showLegacyManifestNotice(pending);
       return;
     }
     if (pending && (pending.idea !== idea || (pending.mix_id || null) !== mixId)) {
@@ -452,7 +475,11 @@
         view.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
         liveStatus.append(h('a', { href: href('/'), 'data-route': '/', text: ' Return to your ventures.' }));
         toast(message);
-      } else { orbWrap.classList.remove('forming'); formingStatus.textContent = ''; heroTag.style.opacity = ''; heroError.textContent = message; }
+      } else {
+        orbWrap.classList.remove('forming'); formingStatus.textContent = ''; heroTag.style.opacity = '';
+        if (pendingManifest()?.legacy) showLegacyManifestNotice(pendingManifest());
+        else heroError.textContent = message;
+      }
     } finally {
       wait.finish('interrupted');
       wait.dispose();

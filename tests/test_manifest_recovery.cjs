@@ -18,6 +18,9 @@ const context = {
   },
   API: '',
   AbortSignal,
+  manifestBusy: false,
+  heroError: { textContent: '' },
+  window: { confirm: () => false },
   setTimeout: fn => { fn(); return 1; },
   addEventListener: () => {},
   fetch: async (url, options) => {
@@ -60,6 +63,31 @@ const request = { request_id: 'fixture-request-id', idea: 'A compact workbench o
   assert.equal(context.pendingManifest().request_id, request.request_id);
   context.clearManifest(request.request_id);
   assert.equal(context.pendingManifest(), null);
+
+  // Explicit dismissal is legacy-only and never sends generation or removes
+  // creator access/unrelated storage. Cancelling confirmation preserves recovery.
+  const legacy = { ...request, legacy: true };
+  const beforeDismissRequests = requests.length;
+  storage.set('unrelated-creator-setting', 'keep');
+  context.rememberManifest(legacy);
+  assert.equal(context.dismissLegacyManifest(request.request_id), false);
+  assert.equal(context.pendingManifest().request_id, request.request_id);
+  context.window.confirm = () => true;
+  assert.equal(context.dismissLegacyManifest('wrong-request'), false);
+  context.manifestBusy = true;
+  assert.equal(context.dismissLegacyManifest(request.request_id), false);
+  context.manifestBusy = false;
+  assert.equal(context.dismissLegacyManifest(request.request_id), true);
+  assert.equal(context.pendingManifest(), null);
+  assert.equal(storage.get('unrelated-creator-setting'), 'keep');
+  assert.equal(requests.length, beforeDismissRequests);
+  assert.match(context.heroError.textContent, /No new request/);
+  context.rememberManifest(request);
+  assert.equal(context.dismissLegacyManifest(request.request_id), false);
+  context.rememberManifest(legacy);
+  context.window.confirm = () => { context.rememberManifest({ ...request, request_id: 'newer' }); return true; };
+  assert.equal(context.dismissLegacyManifest(request.request_id), false);
+  assert.equal(context.pendingManifest().request_id, 'newer');
 
   // Storage survives a page reload; malformed or disabled storage is safe.
   context.rememberManifest(request);

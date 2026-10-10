@@ -25,14 +25,17 @@ function fixture() {
   const storage = new Map(), requests = [], completions = [], errors = [];
   let responses = [];
   const node = () => ({ textContent: '', style: {}, classList: { add() {}, remove() {}, toggle() {} },
-    remove() {}, append() {}, prepend() {}, querySelectorAll: () => [] });
+    remove() {}, append() {}, prepend() {},
+    replaceChildren(...children) { this.textContent = children.map(c => c.textContent || '').join(' '); },
+    querySelectorAll: () => [] });
   const context = {
     localStorage: { getItem: k => storage.get(k) || null, setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) },
     API: '', AbortSignal, TextDecoder, crypto: { randomUUID },
     setTimeout: fn => { fn(); return 1; }, addEventListener() {},
     manifestBusy: false, pendingMixSentence: null, pendingMixId: null,
     orbWrap: node(), heroTag: node(), formingName: node(), formingStatus: node(), heroError: node(),
-    h: node, mount() {}, href: path => path, toast: message => errors.push(message),
+    h: (tag, attrs) => Object.assign(node(), { textContent: attrs?.text || '' }),
+    mount() {}, href: path => path, toast: message => errors.push(message),
     history: { replaceState() {} },
     VentureView: () => ({ ...node(), update() {}, complete: data => completions.push(data) }),
     generationWait: () => ({ signal: new AbortController().signal, first() {}, finish() {}, pause() {}, dispose() {} }),
