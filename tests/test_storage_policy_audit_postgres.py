@@ -31,14 +31,15 @@ class StoragePolicyAuditPostgresTests(unittest.TestCase):
 
         # No TemporaryDirectory finalizer: it must never delete a live cluster
         # after a failed shutdown, including when this class is garbage-collected.
-        cls.root = Path(tempfile.mkdtemp(prefix="audit-pg-", dir="/tmp"))
+        cls.root = Path(tempfile.mkdtemp(prefix="audit-pg-"))
         cls.data = cls.root / "data"
         cls.socket = cls.root / "socket"
         cls.addClassCleanup(cls.cleanup_cluster)
         cls.socket.mkdir(mode=0o700)
         # An allowlist, not a copy of os.environ: no PG*, Supabase, secrets,
         # service files, or user startup configuration can reach subprocesses.
-        cls.env = {"LC_ALL": "C", "HOME": str(cls.root)}
+        # Avoid initdb scanning the host's full timezone database in Nix.
+        cls.env = {"LC_ALL": "C", "HOME": str(cls.root), "TZ": "UTC"}
         cls.run_tool("initdb", "-D", str(cls.data), "-U", "audit_owner",
                      "--no-locale", "--encoding=UTF8",
                      "--auth-local=trust", "--auth-host=reject")
@@ -369,7 +370,7 @@ class StoragePolicyAuditHarnessFailureTests(unittest.TestCase):
         def execute(command, **kwargs):
             calls.append(command)
             self.assertEqual(kwargs["env"], {
-                "LC_ALL": "C", "HOME": str(self.root),
+                "LC_ALL": "C", "HOME": str(self.root), "TZ": "UTC",
             })
             self.assertEqual(kwargs["timeout"], 30)
             self.assertTrue(kwargs["capture_output"])

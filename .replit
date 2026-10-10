@@ -68,4 +68,4 @@ args = "npm run install:browser && npm run test:browser -- --workers=3"
 
 [postMerge]
 path = "scripts/post-merge.sh"
-timeoutMs = 180000
+timeoutMs = 300000
