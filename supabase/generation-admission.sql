@@ -113,4 +113,4 @@ grant execute on function public.release_generation(text) to service_role;
 grant execute on function public.consume_refinement_admission(text) to service_role;
 grant execute on function public.create_reserved_venture(text,jsonb) to service_role;
 commit;
-notify pgrst, 'reload schema';p out
+notify pgrst, 'reload schema';
