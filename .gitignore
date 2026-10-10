@@ -3,5 +3,6 @@ data.sandbox/
 .env
 __pycache__/
 *.pyc
+/generated-artifacts/
 .pythonlibs/
 .pytest_cache/
