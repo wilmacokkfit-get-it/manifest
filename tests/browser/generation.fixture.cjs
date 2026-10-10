@@ -13,13 +13,13 @@ const venture = {
 };
 
 const test = base.extend({
-  harness: async ({ page }, use) => {
+  harness: async ({ page, context }, use) => {
     const errors = [], unexpected = [];
     let holdRecovery = false;
     const recoveryRequests = [];
     page.on('pageerror', e => errors.push(e.message));
     // No request is allowed through to a backend or third-party service.
-    await page.route('**/*', async route => {
+    await context.route('**/*', async route => {
       const url = new URL(route.request().url());
       if (url.origin !== 'https://manifest.test') return route.fulfill({ body: '' });
       if (url.pathname.startsWith('/api/')) {
@@ -51,7 +51,9 @@ const test = base.extend({
         'owner-auth.js': 'application/javascript', 'styles.css': 'text/css', 'favicon.svg': 'image/svg+xml',
       }[file] });
     });
-    await page.addInitScript(() => {
+    // Clock initialization is context-scoped. Keep these scripts in that same
+    // scope: Firefox runs context scripts before page scripts.
+    await context.addInitScript(() => {
       window.__nativePerf = {
         measure: performance.measure.bind(performance),
         getEntriesByType: performance.getEntriesByType.bind(performance),
@@ -62,9 +64,9 @@ const test = base.extend({
     // Route.fulfill buffers a whole response. Intercept only generation fetches
     // in the browser instead, preserving real Response/ReadableStream parsing
     // and AbortSignal behavior, while allowing incremental SSE and stalled JSON.
-    await page.addInitScript(() => {
+    await context.addInitScript(() => {
       // Playwright stubs measure/getEntries while faking performance.now.
-      // Keep Chromium's real User Timing buffer, with fake numeric start/end.
+      // Keep the engine's real User Timing buffer, with fake numeric start/end.
       performance.measure = window.__nativePerf.measure;
       performance.getEntriesByType = window.__nativePerf.getEntriesByType;
       const nativeFetch = window.fetch.bind(window);

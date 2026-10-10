@@ -9,7 +9,8 @@
   },
   "scripts": {
     "test": "node tests/test_generation_feedback.cjs && node tests/test_manifest_submission.cjs && node tests/test_manifest_recovery.cjs",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "install:browser": "node scripts/install-browser-tests.cjs"
   },
   "repository": {
     "type": "git",

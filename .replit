@@ -4,7 +4,7 @@ modules = ["python-3.11", "nodejs-24"]
 
 [nix]
 channel = "stable-24_05"
-packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "postgresql", "tcl", "tk", "zlib", "chromium"]
+packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "postgresql", "tcl", "tk", "zlib", "chromium", "gtk3", "glib", "dbus", "alsa-lib", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXrandr", "xorg.libXcursor", "xorg.libXi", "libxkbcommon", "pango", "cairo", "gdk-pixbuf", "atk", "icu", "libdrm", "mesa", "libGL", "libepoxy", "libevent", "libgudev", "libsecret", "enchant2", "flite", "libtasn1", "hyphen", "libmanette", "woff2", "gst_all_1.gstreamer", "gst_all_1.gst-plugins-base", "gst_all_1.gst-plugins-good", "icu74", "libxml2", "libxslt", "sqlite", "harfbuzz", "libopus", "gst_all_1.gst-plugins-bad", "libjpeg8", "libavif", "harfbuzzFull", "gcc14"]
 
 [deployment]
 run = ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "5000"]
@@ -59,12 +59,12 @@ outputType = "webview"
 name = "browser-waiting"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "npm run test:browser -- --workers=3"
-
 [workflows.workflow.metadata]
 isValidation = true
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run install:browser && npm run test:browser -- --workers=3"
 
 [postMerge]
 path = "scripts/post-merge.sh"

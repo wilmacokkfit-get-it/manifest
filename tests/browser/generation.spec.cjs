@@ -83,6 +83,10 @@ for (const operation of ['venture', 'path', 'refinement']) {
     await expect.poll(() => harness.measures(operation)).toContainEqual({
       name: `manifest.${operation}.completed`, duration: 74000,
     });
+    // These must be native PerformanceMeasure entries, not fake-clock objects.
+    expect(await page.evaluate(() => performance.getEntriesByType('measure')
+      .filter(entry => entry.name.startsWith('manifest.'))
+      .every(entry => entry instanceof PerformanceMeasure && entry.entryType === 'measure'))).toBe(true);
     expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
     await page.clock.runFor(300000);
     expect(await page.evaluate(() => window.__synthetic.requests[0].aborted)).toBe(true);
@@ -109,6 +113,19 @@ for (const operation of ['venture', 'path', 'refinement']) {
       await page.getByRole('button', { name: 'Manifest it' }).click();
     } else await retry(page, operation).click();
     await expect.poll(() => page.evaluate(() => window.__synthetic.requests.length)).toBe(2);
+    // Retry must actually finish, not merely enable a button/send new headers.
+    if (operation === 'refinement') {
+      await harness.json({ ...harness.venture, name: 'Retried fixture', refinement: { state: 'completed' } });
+      await expect(page.locator('.v-name')).toHaveText('Retried fixture');
+    } else {
+      await harness.send('done', harness.venture);
+      await harness.close();
+      await expect(page.locator('.v-name')).toHaveText(harness.venture.name);
+    }
+    await expect.poll(() => harness.measures(operation)).toContainEqual({
+      name: `manifest.${operation}.completed`, duration: 0,
+    });
+    expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
   });
 
   for (const phase of operation === 'refinement' ? ['before text'] : ['before text', 'after partial text']) {
@@ -173,6 +190,10 @@ test('refinement: watchdog interrupts a stalled JSON body, not just headers', as
   await expect(page.locator('#refinement-status')).toContainText('timed out');
   await expect(page.locator('.v-name')).toHaveText(harness.venture.name);
   await expect(retry(page, 'refinement')).toBeEnabled();
+  expect(await page.evaluate(() => window.__synthetic.requests[0].aborted)).toBe(true);
+  expect(await harness.measures('refinement')).toEqual([
+    { name: 'manifest.refinement.failed', duration: 240000 },
+  ]);
   expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
 });
 
