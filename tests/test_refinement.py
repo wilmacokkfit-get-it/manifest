@@ -325,6 +325,40 @@ class RefinementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retried.status_code, 200)
         self.assertEqual(retried.json()["refinement"]["state"], "completed")
 
+    async def test_refinement_timeout_restores_original_and_releases_claim(self) -> None:
+        row = await self.store.create_venture(venture(slug="timed-out-refinement"))
+        async def stalled(*args, **kwargs):
+            yield '{"name":"Not committed",'
+            await asyncio.Event().wait()
+        with patch.object(server, "TEXT_TIMEOUT_SECONDS", .01), patch.object(
+            server.llm, "stream_refinement_text", stalled
+        ):
+            async with self.client() as client:
+                response = await client.post(f"/api/ventures/{row['slug']}/refine", json={"context": "Make it smaller"})
+        self.assertEqual(response.status_code, 504)
+        self.assertIn("two-minute limit", response.text)
+        saved = await self.store.get_by_id(row["id"])
+        self.assertEqual(saved["name"], row["name"])
+        self.assertEqual(saved["grounding"], row["grounding"])
+        self.assertEqual(saved["status"], "ready")
+
+    async def test_path_timeout_releases_claim_and_leaves_venture_unchanged(self) -> None:
+        row = await self.store.create_venture(venture(slug="timed-out-path"))
+        async def stalled(*args, **kwargs):
+            yield '{"first_move":"Preview",'
+            await asyncio.Event().wait()
+        with patch.object(server, "TEXT_TIMEOUT_SECONDS", .01), patch.object(
+            server.llm, "stream_path_text", stalled
+        ):
+            async with self.client() as client:
+                response = await client.post(f"/api/ventures/{row['slug']}/path", json={"tier": 0})
+        self.assertIn("two-minute limit", response.text)
+        self.assertNotIn("event: done", response.text)
+        saved = await self.store.get_by_id(row["id"])
+        self.assertEqual(saved["status"], "ready")
+        self.assertIsNone(saved["path"])
+        self.assertNotIn("path_claim_id", saved["grounding"].get("_refinement", {}))
+
     async def test_cancelled_claim_acquisition_cleans_up_after_delayed_response(self) -> None:
         row = await self.store.create_venture(venture(slug="cancel-during-claim"))
         original_claim = self.store.claim_refinement

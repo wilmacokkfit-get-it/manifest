@@ -16,9 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import struct
+import time
 import zlib
+from contextlib import aclosing
+from functools import wraps
 from typing import AsyncIterator
 
 SYSTEM_PROMPT = """You are the engine inside MANIFEST, a product that turns one sentence into a fully formed venture.
@@ -95,9 +99,60 @@ def build_user_message(idea: str, angle: str | None, avoid: list[dict] | None) -
 # Text streaming
 # ---------------------------------------------------------------------------
 
+log = logging.getLogger("uvicorn.error.manifest.llm")
+
+
+def reasoning_options(model: str) -> dict:
+    """Keep the quality default; alternatives are explicit, never provider fallbacks."""
+    if not model.startswith("gpt-5"):
+        return {}
+    effort = os.environ.get("LLM_REASONING_EFFORT", "medium").strip().lower()
+    if effort not in {"low", "medium", "high"}:
+        raise ValueError("LLM_REASONING_EFFORT must be low, medium or high.")
+    return {"reasoning": {"effort": effort}}
+
+
+def measured_stream(operation: str):
+    """Log timings only: never idea text, output, creator identifiers or credentials."""
+    def decorate(fn):
+        @wraps(fn)
+        async def run(*args, **kwargs):
+            started = time.perf_counter()
+            first = None
+            chars = 0
+            outcome = "cancelled"
+            provider = text_provider()
+            model = os.environ.get("LLM_MODEL") or {
+                "openai": "gpt-5-mini", "anthropic": "claude-sonnet-4-5",
+            }.get(provider, "mock")
+            try:
+                async with aclosing(fn(*args, **kwargs)) as stream:
+                    async for chunk in stream:
+                        if chunk and first is None:
+                            first = time.perf_counter() - started
+                        chars += len(chunk)
+                        yield chunk
+                outcome = "completed"
+            except Exception:
+                outcome = "failed"
+                raise
+            finally:
+                log.info("llm_timing %s", json.dumps({
+                    "operation": operation, "provider": provider, "model": model,
+                    "reasoning_effort": os.environ.get("LLM_REASONING_EFFORT", "medium")
+                    if provider == "openai" and model.startswith("gpt-5") else None,
+                    "first_text_seconds": round(first, 3) if first is not None else None,
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                    "output_chars": chars, "outcome": outcome,
+                }))
+        return run
+    return decorate
+
 def text_provider() -> str:
     p = os.environ.get("LLM_PROVIDER", "").strip().lower()
     if p:
+        if p not in {"anthropic", "openai", "mock"}:
+            raise ValueError("LLM_PROVIDER must be anthropic, openai or mock; no provider fallback was attempted.")
         return p
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_BASE_URL"):
         return "anthropic"
@@ -116,17 +171,20 @@ unsafe or impossible build. Any proposed correction must retain the core intent.
 """
 
 
+@measured_stream("venture")
 async def stream_venture_text(idea: str, angle: str | None = None, avoid: list[dict] | None = None,
                               preserve: bool = False) -> AsyncIterator[str]:
     provider = text_provider()
     msg = build_user_message(idea, angle, None if preserve else avoid)
     system = PRESERVE_SYSTEM_PROMPT if preserve else SYSTEM_PROMPT
     if provider == "anthropic":
-        async for chunk in _stream_anthropic(msg, system=system):
-            yield chunk
+        async with aclosing(_stream_anthropic(msg, system=system)) as stream:
+            async for chunk in stream:
+                yield chunk
     elif provider == "openai":
-        async for chunk in _stream_openai(msg, system=system):
-            yield chunk
+        async with aclosing(_stream_openai(msg, system=system)) as stream:
+            async for chunk in stream:
+                yield chunk
     else:
         async for chunk in _stream_mock(idea):
             yield chunk
@@ -152,44 +210,25 @@ def _refinement_user_message(venture: dict, context: str) -> str:
     return (
         "Original idea:\n" + str(venture.get("idea_raw") or "") + "\n\n"
         "Existing generated venture (refine this, do not start over):\n"
-        + json.dumps(existing, ensure_ascii=False)
+        + json.dumps(existing, ensure_ascii=False, separators=(",", ":"))
         + "\n\nNew context from the creator:\n"
         + context
         + "\n\nReturn the complete refined venture JSON now. Start with { and end with }. No prose, no code fences."
     )
 
 
+@measured_stream("refinement")
 async def stream_refinement_text(venture: dict, context: str) -> AsyncIterator[str]:
     provider = text_provider()
     msg = _refinement_user_message(venture, context)
     if provider == "anthropic":
-        import anthropic
-
-        client = anthropic.AsyncAnthropic()
-        model = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
-        async with client.messages.stream(
-            model=model, max_tokens=2600, system=REFINEMENT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": msg}],
-        ) as stream:
-            async for text in stream.text_stream:
+        async with aclosing(_stream_anthropic(msg, REFINEMENT_SYSTEM_PROMPT, max_tokens=2600)) as stream:
+            async for text in stream:
                 yield text
     elif provider == "openai":
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI()
-        model = os.environ.get("LLM_MODEL", "gpt-5-mini")
-        kwargs = {"reasoning": {"effort": "medium"}} if model.startswith("gpt-5") else {}
-        stream = await client.responses.create(
-            model=model, instructions=REFINEMENT_SYSTEM_PROMPT, input=msg, stream=True, **kwargs,
-        )
-        async for event in stream:
-            event_type = getattr(event, "type", "")
-            if event_type in ("response.failed", "response.incomplete"):
-                response = getattr(event, "response", None)
-                detail = getattr(response, "error", None) or getattr(response, "incomplete_details", None)
-                raise RuntimeError(f"OpenAI refinement {event_type}: {detail or 'provider did not complete the response.'}")
-            if event_type == "response.output_text.delta":
-                yield event.delta
+        async with aclosing(_stream_openai(msg, REFINEMENT_SYSTEM_PROMPT)) as stream:
+            async for text in stream:
+                yield text
     else:
         # The mock provider keeps the same venture identity/content shape while
         # allowing API and persistence behavior to be exercised without a key.
@@ -204,21 +243,23 @@ async def stream_refinement_text(venture: dict, context: str) -> AsyncIterator[s
             yield text[i:i + 24]
 
 
-async def _stream_anthropic(msg: str, system: str = SYSTEM_PROMPT) -> AsyncIterator[str]:
+async def _stream_anthropic(msg: str, system: str = SYSTEM_PROMPT, max_tokens: int = 2200) -> AsyncIterator[str]:
     import anthropic
 
     client = anthropic.AsyncAnthropic()
     model = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
-    async with client.messages.stream(
-        model=model,
-        max_tokens=2200,
-        system=system,
-        messages=[
-            {"role": "user", "content": msg},
-        ],
-    ) as stream:
-        async for text in stream.text_stream:
-            yield text
+    try:
+        async with client.messages.stream(
+            model=model, max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": msg}],
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
+            final = await stream.get_final_message()
+            if final.stop_reason != "end_turn":
+                raise RuntimeError("The text provider could not finish the response. Please try again.")
+    finally:
+        await client.close()
 
 
 async def _stream_openai(msg: str, system: str = SYSTEM_PROMPT) -> AsyncIterator[str]:
@@ -226,17 +267,28 @@ async def _stream_openai(msg: str, system: str = SYSTEM_PROMPT) -> AsyncIterator
 
     client = AsyncOpenAI()
     model = os.environ.get("LLM_MODEL", "gpt-5-mini")
-    kwargs = {"reasoning": {"effort": "medium"}} if model.startswith("gpt-5") else {}
-    stream = await client.responses.create(
-        model=model,
-        instructions=system,
-        input=msg,
-        stream=True,
-        **kwargs,
-    )
-    async for event in stream:
-        if getattr(event, "type", "") == "response.output_text.delta":
-            yield event.delta
+    stream = None
+    completed = False
+    try:
+        stream = await client.responses.create(
+            model=model, instructions=system, input=msg, stream=True,
+            **reasoning_options(model),
+        )
+        async for event in stream:
+            event_type = getattr(event, "type", "")
+            if event_type in ("response.failed", "response.incomplete", "error"):
+                raise RuntimeError(f"The text provider could not finish the response ({event_type}). Please try again.")
+            if event_type == "response.completed":
+                completed = True
+            if event_type == "response.output_text.delta":
+                yield event.delta
+        if not completed:
+            raise RuntimeError("The text provider connection ended before completion. Please try again.")
+    finally:
+        if stream is not None and hasattr(stream, "close"):
+            await stream.close()
+        if hasattr(client, "close"):
+            await client.close()
 
 
 MOCK_VENTURE = {
@@ -393,26 +445,18 @@ def _path_user_message(venture: dict, tier_index: int) -> str:
     )
 
 
+@measured_stream("path")
 async def stream_path_text(venture: dict, tier_index: int) -> AsyncIterator[str]:
     provider = text_provider()
     msg = _path_user_message(venture, tier_index)
     if provider == "anthropic":
-        import anthropic
-        client = anthropic.AsyncAnthropic()
-        model = os.environ.get("LLM_MODEL", "claude-sonnet-4-5")
-        async with client.messages.stream(model=model, max_tokens=3500, system=PATH_SYSTEM_PROMPT,
-                                          messages=[{"role": "user", "content": msg}]) as stream:
-            async for text in stream.text_stream:
+        async with aclosing(_stream_anthropic(msg, PATH_SYSTEM_PROMPT, max_tokens=3500)) as stream:
+            async for text in stream:
                 yield text
     elif provider == "openai":
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI()
-        model = os.environ.get("LLM_MODEL", "gpt-5-mini")
-        kwargs = {"reasoning": {"effort": "medium"}} if model.startswith("gpt-5") else {}
-        stream = await client.responses.create(model=model, instructions=PATH_SYSTEM_PROMPT, input=msg, stream=True, **kwargs)
-        async for event in stream:
-            if getattr(event, "type", "") == "response.output_text.delta":
-                yield event.delta
+        async with aclosing(_stream_openai(msg, PATH_SYSTEM_PROMPT)) as stream:
+            async for text in stream:
+                yield text
     else:
         text = json.dumps(MOCK_PATH)
         for i in range(0, len(text), 24):

@@ -91,13 +91,14 @@ class CreationStandardTests(unittest.IsolatedAsyncioTestCase):
     async def test_reasoning_budget_applies_to_generation_refinement_and_path(self):
         async def events():
             yield SimpleNamespace(type="response.output_text.delta", delta='{"name":"Test"}')
+            yield SimpleNamespace(type="response.completed")
 
         client = SimpleNamespace(
             responses=SimpleNamespace(
                 create=AsyncMock(side_effect=lambda **kwargs: events())
             )
         )
-        with patch.dict("os.environ", {"LLM_MODEL": "gpt-5-mini"}), patch.object(
+        with patch.dict("os.environ", {"LLM_MODEL": "gpt-5-mini", "LLM_REASONING_EFFORT": "medium"}), patch.object(
             llm, "text_provider", return_value="openai"
         ), patch("openai.AsyncOpenAI", return_value=client):
             self.assertEqual(
@@ -114,6 +115,7 @@ class CreationStandardTests(unittest.IsolatedAsyncioTestCase):
     async def test_other_models_do_not_receive_unsupported_reasoning_parameter(self):
         async def events():
             yield SimpleNamespace(type="response.output_text.delta", delta="{}")
+            yield SimpleNamespace(type="response.completed")
 
         client = SimpleNamespace(
             responses=SimpleNamespace(create=AsyncMock(return_value=events()))

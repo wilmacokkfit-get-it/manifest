@@ -294,6 +294,24 @@ class GenerationAdmissionRouteTests(unittest.IsolatedAsyncioTestCase):
             retry = await self.client.post("/api/manifest", json={"idea": "A compact workbench organizer"})
         self.assertIn("event: done", retry.text)
 
+    async def test_text_timeout_before_or_after_first_token_releases_slot(self):
+        for partial in (False, True):
+            async def stalled(*args, **kwargs):
+                if partial:
+                    yield '{"name":"Preview",'
+                await asyncio.Event().wait()
+                yield ""
+            with patch.object(server, "TEXT_TIMEOUT_SECONDS", .01), patch.object(
+                server.llm, "stream_venture_text", stalled
+            ):
+                response = await self.client.post("/api/manifest", json={"idea": "A compact workbench organizer"})
+            self.assertIn("two-minute limit", response.text)
+            self.assertNotIn("event: done", response.text)
+            # Retrying admission proves visitor + global pending slots were released.
+            reservation = "timeout-retry-" + str(partial)
+            self.assertIsNone(await self.store.reserve_generation(reservation, "ip:127.0.0.1", 1, 1, 1))
+            await self.store.release_generation(reservation)
+
     async def test_cancelled_request_releases_slot(self):
         started = asyncio.Event()
         async def stalled(*args, **kwargs):

@@ -421,6 +421,9 @@ def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+TEXT_TIMEOUT_SECONDS = 120
+
+
 # ---------------------------------------------------------------------------
 # Generation
 # ---------------------------------------------------------------------------
@@ -452,12 +455,13 @@ async def manifest(body: ManifestBody, request: Request):
 
     async def gen():
         buf = ""
+        text_completed = False
         last_emit = 0.0
         last_key = None
         try:
             yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at})
             # A bounded worker cannot outlive its five-minute database lease.
-            with anyio.fail_after(120):
+            with anyio.fail_after(TEXT_TIMEOUT_SECONDS):
                 avoid = [] if chosen else await store.recent_concepts(owner)
                 stream_options = {"angle": angle, "avoid": avoid}
                 if chosen:
@@ -469,6 +473,7 @@ async def manifest(body: ManifestBody, request: Request):
                     if obj and (now - last_emit > 0.07 or key != last_key):
                         last_emit, last_key = now, key
                         yield _sse("partial", {"data": obj, "streaming": key})
+            text_completed = True
             obj, _ = parse_partial(buf)
             if not obj or not obj.get("name"):
                 raise RuntimeError("The engine returned nothing usable.")
@@ -488,6 +493,10 @@ async def manifest(body: ManifestBody, request: Request):
             yield _sse("done", _public_view(saved, is_owner=True, unlimited=unlimited))
         except HTTPException as e:
             yield _sse("error", {"message": e.detail})
+        except TimeoutError:
+            message = ("Generation reached its two-minute limit. No venture was saved. Please try again."
+                       if not text_completed else "Saving took too long. Check your ventures before trying again.")
+            yield _sse("error", {"message": message})
         except Exception as e:  # noqa: BLE001
             yield _sse("error", {"message": f"The engine stalled: {str(e)[:200]}"})
         finally:
@@ -678,6 +687,7 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
     original_grounding = dict(v.get("grounding") or {})
     claim_id = new_token()
     completed = False
+    text_completed = False
     try:
         # The store may commit its conditional PATCH just before a request is
         # cancelled or the network drops its response. Keep acquisition shielded,
@@ -694,9 +704,10 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
             await _shielded_bounded_call(store.consume_refinement_admission(admission))
 
         buf = ""
-        with anyio.fail_after(120):
+        with anyio.fail_after(TEXT_TIMEOUT_SECONDS):
             async for chunk in llm.stream_refinement_text(v, context):
                 buf += chunk
+        text_completed = True
         obj = _complete_refinement(buf)
         data = _normalize(obj)
         marker = {"state": "completed", "context": context, "claim_id": claim_id}
@@ -730,6 +741,10 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
         raise
     except HTTPException:
         raise
+    except TimeoutError as exc:
+        message = ("Refinement reached its two-minute limit. Your original result is unchanged. Please try again."
+                   if not text_completed else "Saving the refinement took too long. Refresh to check whether it finished.")
+        raise HTTPException(504, message) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"Refinement failed: {str(exc)[:200]}") from exc
     finally:
@@ -792,7 +807,7 @@ def _normalize_path(data: dict, tier: int, tier_label: str) -> dict:
 
 async def _bounded_path_text(v: dict, tier: int):
     # Keep provider work shorter than the durable claim's five-minute lease.
-    async with asyncio.timeout(120):
+    async with asyncio.timeout(TEXT_TIMEOUT_SECONDS):
         async for chunk in llm.stream_path_text(v, tier):
             yield chunk
 
@@ -827,6 +842,7 @@ async def choose_path(slug: str, body: PathBody, request: Request):
         buf = ""
         last_emit, last_key = 0.0, None
         finished = False
+        text_completed = False
         try:
             async for chunk in _bounded_path_text(v, tier):
                 buf += chunk
@@ -835,6 +851,7 @@ async def choose_path(slug: str, body: PathBody, request: Request):
                 if obj and (now - last_emit > 0.08 or key != last_key):
                     last_emit, last_key = now, key
                     yield _sse("partial", {"data": obj, "streaming": key})
+            text_completed = True
             obj, _ = parse_partial(buf)
             if not obj or not obj.get("steps"):
                 raise RuntimeError("The engine returned nothing usable.")
@@ -846,6 +863,10 @@ async def choose_path(slug: str, body: PathBody, request: Request):
             yield _sse("done", await _full_view(saved, True, request))
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            message = ("The path reached its two-minute limit. Your venture is unchanged. Please try again."
+                       if not text_completed else "Saving the path took too long. Refresh to check whether it finished.")
+            yield _sse("error", {"message": message})
         except Exception as e:  # noqa: BLE001
             print(f"[path] {slug} failed: {e}")
             yield _sse("error", {"message": str(e)[:300] or "The engine stalled."})

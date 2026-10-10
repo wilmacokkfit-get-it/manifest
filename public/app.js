@@ -54,6 +54,31 @@
   }
   const assetUrl = (u) => (u && u.startsWith('/') ? API + u : u);
 
+  // Timings are local Performance entries, not idea text or visitor analytics.
+  function generationWait(operation, paint, limitMs = 210000) {
+    const started = performance.now();
+    const controller = new AbortController();
+    let firstText = false, stopped = false;
+    const tick = () => {
+      const seconds = Math.floor((performance.now() - started) / 1000);
+      paint(`${firstText ? 'Writing' : 'Considering your idea'}… ${seconds}s. ${seconds >= 30 ? 'Still working; text generation has a two-minute limit.' : 'Text appears when it is ready.'}`);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    const deadline = setTimeout(() => controller.abort(), limitMs);
+    const measure = (suffix) => performance.measure(`manifest.${operation}.${suffix}`, { start: started, end: performance.now() });
+    return {
+      signal: controller.signal,
+      first() { if (!firstText) { firstText = true; measure('first-visible-text'); tick(); } },
+      finish(outcome = 'completed') {
+        if (stopped) return;
+        stopped = true; clearInterval(timer); clearTimeout(deadline);
+        measure(outcome);
+      },
+      dispose() { controller.abort(); },
+    };
+  }
+
   // ---------- routing ----------
   function href(route) {
     if (SERVED) return route;
@@ -129,7 +154,7 @@
   // ---------- landing ----------
   const ideaForm = $('#idea-form'), ideaInput = $('#idea'), orbWrap = $('#orb-wrap');
   const formingName = $('#forming-name'), formingStatus = $('#forming-status'), heroError = $('#hero-error'), heroTag = $('#hero-tag');
-  const phrases = ['Reaching into the idea space…', 'Finding the shape of it…', 'Naming what does not exist yet…', 'Drafting the launch path…', 'Sealing the record…'];
+  let manifestBusy = false;
 
   ideaInput.addEventListener('input', () => { ideaInput.style.height = 'auto'; ideaInput.style.height = ideaInput.scrollHeight + 'px'; });
   ideaInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ideaForm.requestSubmit(); } });
@@ -178,21 +203,26 @@
 
   // ---------- the reveal ----------
   async function startManifest(idea, mixId = null) {
+    if (manifestBusy) return;
+    manifestBusy = true;
     orbWrap.classList.add('forming');
     heroTag.style.opacity = '0';
-    let pi = 0; formingStatus.textContent = phrases[0];
-    const phraseTimer = setInterval(() => { pi = (pi + 1) % phrases.length; formingStatus.textContent = phrases[pi]; }, 2200);
+    formingName.textContent = '';
+    const liveStatus = h('p', { role: 'status', 'aria-live': 'polite', class: 'refinement-note' });
+    const wait = generationWait('venture', text => {
+      formingStatus.textContent = text;
+      liveStatus.textContent = text;
+    });
 
     let view = null;           // VentureView once we move to it
     let moved = false;
     let meta = null;
 
-    const finish = () => clearInterval(phraseTimer);
-
     try {
       const res = await fetch(API + '/api/manifest', {
         method: 'POST',
         credentials: 'same-origin',
+        signal: wait.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idea, ...(mixId ? { mix_id: mixId } : {}) }),
       });
@@ -216,19 +246,21 @@
           if (!ev) continue;
           if (ev.event === 'meta') meta = ev.data;
           else if (ev.event === 'partial') {
+            wait.first();
             const { data, streaming } = ev.data;
             if (!moved) {
               formingName.textContent = data.name || '';
               formingName.classList.toggle('caret', streaming === 'name');
               if (data.name && streaming && streaming !== 'name') {
                 // name is complete → move to the page
-                moved = true; finish();
+                moved = true;
                 view = VentureView({ live: { meta, data, streaming, idea } });
+                view.prepend(liveStatus);
                 mount(view, null);
               }
             } else view.update(data, streaming);
           } else if (ev.event === 'done') {
-            done = true; finish();
+            done = true; wait.finish(); liveStatus.remove();
             if (pendingMixSentence === idea) { pendingMixId = null; pendingMixSentence = null; }
             if (!moved) { view = VentureView({ live: { meta, data: ev.data, streaming: null, idea } }); mount(view, null); }
             view.complete(ev.data);
@@ -238,10 +270,21 @@
           }
         }
       }
+      if (!done) throw new Error('The connection ended before completion. This preview is not a confirmed result. Check your ventures before trying again.');
+      await reader.cancel();
     } catch (err) {
-      finish();
-      if (moved) { toast(err.message); }
-      else { orbWrap.classList.remove('forming'); formingStatus.textContent = ''; heroTag.style.opacity = ''; heroError.textContent = err.message; }
+      wait.finish('failed');
+      const message = err.name === 'AbortError' ? 'The connection timed out. Check your ventures before trying again.' : err.message;
+      if (moved) {
+        liveStatus.textContent = message;
+        view.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
+        liveStatus.append(h('a', { href: href('/'), 'data-route': '/', text: ' Return to your ventures.' }));
+        toast(message);
+      } else { orbWrap.classList.remove('forming'); formingStatus.textContent = ''; heroTag.style.opacity = ''; heroError.textContent = message; }
+    } finally {
+      wait.finish('interrupted');
+      wait.dispose();
+      manifestBusy = false;
     }
   }
 
@@ -485,13 +528,22 @@
         refinementBusy = true;
         stopPolling();
         renderRefinement(v);
+        const wait = generationWait('refinement', text => {
+          const currentNote = refinement.querySelector('.refinement-note');
+          if (currentNote) currentNote.textContent = `${text} Your first result stays safe until this update is ready.`;
+        }, 240000);
         try {
-          const fresh = await api(vpath(v, '/refine'), { method: 'POST', body: JSON.stringify({ context }) });
+          const fresh = await api(vpath(v, '/refine'), { method: 'POST', body: JSON.stringify({ context }), signal: wait.signal });
+          wait.finish();
           refinementBusy = false;
           refinementDraft = '';
           complete(fresh);
           toast(unlimited ? 'Your refinement is complete.' : 'Your one refinement is complete.');
-        } catch (error) { await recover(error); }
+        } catch (error) {
+          wait.finish('failed');
+          if (error.name === 'AbortError') error = new Error('The connection timed out. Checking whether your refinement finished.');
+          await recover(error);
+        } finally { wait.finish('interrupted'); wait.dispose(); }
       } }, label, help, input, h('div', { class: 'refinement-buttons' }, submit, skip), note);
       skip.addEventListener('click', async () => {
         if (refinementBusy) return;
@@ -652,9 +704,13 @@
         h('div', { class: 'psteps' }));
       show(path); roadmap.classList.add('hidden');
       path.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const wait = generationWait('path', text => {
+        const note = path.querySelector('.path-sub');
+        if (note) note.textContent = text;
+      });
       try {
-        const res = await fetch(API + vpath(v, '/path'), { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tier }) });
-        if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.detail || j.message || 'The engine stalled.'); }
+        const res = await fetch(API + vpath(v, '/path'), { method: 'POST', credentials: 'same-origin', signal: wait.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tier }) });
+        if (!res.ok || !res.body) { const j = await res.json().catch(() => ({})); throw new Error(j.detail || j.message || 'The engine stalled.'); }
         const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
         while (true) {
           const { value, done } = await reader.read(); if (done) break;
@@ -663,13 +719,18 @@
           while ((idx = buf.indexOf('\n\n')) >= 0) {
             const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
             const ev = parseSSE(block); if (!ev) continue;
-            if (ev.event === 'partial') paintPartialPath(ev.data.data, ev.data.streaming);
-            else if (ev.event === 'done') { pathStreaming = false; complete(ev.data); toast('Your path is ready. Start with tonight.'); }
+            if (ev.event === 'partial') { wait.first(); paintPartialPath(ev.data.data, ev.data.streaming); }
+            else if (ev.event === 'done') { wait.finish(); pathStreaming = false; complete(ev.data); toast('Your path is ready. Start with tonight.'); }
             else if (ev.event === 'error') throw new Error(ev.data.message);
           }
         }
         if (pathStreaming) throw new Error('The stream ended early.');
-      } catch (e) { pathStreaming = false; toast(e.message); renderTierPicks(venture); renderPath(venture); }
+      } catch (e) {
+        wait.finish('failed'); pathStreaming = false;
+        const message = e.name === 'AbortError' ? 'The connection timed out. Refresh to check whether your path finished before retrying.' : e.message;
+        toast(message); renderTierPicks(venture); renderPath(venture);
+        path.after(h('p', { role: 'status', class: 'refinement-note', text: message }));
+      } finally { wait.finish('interrupted'); wait.dispose(); }
     }
 
     function paintPartialPath(d, streaming) {
