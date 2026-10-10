@@ -473,7 +473,7 @@ class ServerRegressionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(server.llm, "generate_render", stub_render):
             await server._render_images(row)
 
-        self.assertEqual(calls, [("test render", "#aabbcc")])
+        self.assertEqual(calls, [(server.render_brief(row, "test render", 0), "#aabbcc")])
 
         updated = await self.store.get_by_id(row["id"])
         self.assertEqual(updated["images_status"], "ready")

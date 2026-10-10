@@ -275,7 +275,11 @@ class RefinementTests(unittest.IsolatedAsyncioTestCase):
                     break
                 await asyncio.sleep(0.01)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([call[0] for call in calls], refined_output()["image_prompts"])
+        self.assertEqual(
+            [call[0] for call in calls],
+            [server.render_brief(saved, prompt, index)
+             for index, prompt in enumerate(refined_output()["image_prompts"])],
+        )
         self.assertTrue(all(call[1] == refined_output()["accent"] for call in calls))
         self.assertTrue(all(saved["images"]))
 
