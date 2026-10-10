@@ -79,7 +79,7 @@ async def research(topic: str) -> list[dict]:
         raise RuntimeError("Live market research is not configured.")
     from openai import AsyncOpenAI
     today = datetime.now(timezone.utc).date().isoformat()
-    response = await AsyncOpenAI(timeout=100, max_retries=1).responses.create(
+    response = await AsyncOpenAI(timeout=100, max_retries=0).responses.create(
         model=os.environ.get("TREND_MODEL", "gpt-5-mini"),
         tools=[{"type": "web_search", "external_web_access": True}],
         tool_choice="required", include=["web_search_call.action.sources"],
@@ -124,7 +124,7 @@ def floor_brief(row: dict) -> dict:
 
 async def combine(trends: list[dict], floor: list[dict]) -> list[dict]:
     from openai import AsyncOpenAI
-    response = await AsyncOpenAI(timeout=90, max_retries=1).responses.create(
+    response = await AsyncOpenAI(timeout=90, max_retries=0).responses.create(
         model=os.environ.get("TREND_MODEL", "gpt-5-mini"),
         reasoning={"effort": "medium"},
         instructions="""Create three distinctive, buildable venture concepts from ALL selected
@@ -132,6 +132,10 @@ ingredients. Borrow a specific mechanism, not just the names of two industries.
 Each concept must name a physical product or precise service, its exact buyer,
 how the combined parts work, and a cheap measurable first test. No generic AI app,
 dashboard or marketplace unless the ingredients specifically justify it.
+Creator inputs are unverified ideas, not observed trends or evidence. Infer their
+transferable mechanisms and preserve both inputs in each hybrid. Do not require
+Floor ventures or market citations when only creator ideas are supplied. State
+that no sourced market evidence was supplied; never invent sources to fill that gap.
 Check physical feasibility: do not assume incompatible voltages, battery packs,
 motor assemblies, medical components or food-contact materials can be swapped.
 For safety-critical changes require qualified review and make the first test a

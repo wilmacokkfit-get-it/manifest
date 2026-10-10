@@ -39,6 +39,12 @@ MANIFEST should invent potential trends as well as understand and combine existi
 
 **How to apply:** Allow new habits, categories, rituals and business models without requiring prior adoption. Explain the initial adopter, reason to participate, copying mechanism and adoption friction. Label these proposed trends, distinct from sourced observations; never promise that they will become trends.
 
+Renders should express the unusual mechanism and ambitious product form, not generic stock gadgets.
+
+**Why:** The creator said the renders seem too generic and not creative or limit-pushing enough.
+
+**How to apply:** Make the borrowed mechanism visible through specific geometry, materials and useful details. Use complementary mechanism and action views while preserving concept consistency; visual ambition does not establish physical feasibility.
+
 Treat prompt standards as guidance, not verified output guarantees.
 
 **Why:** Even stronger-reasoning live checks returned unsupported certification wording, delayed safety review and refundable deposits described as first revenue. Valid JSON and passing prompt-contract tests did not establish factual or safety quality.

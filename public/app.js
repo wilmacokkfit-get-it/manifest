@@ -596,8 +596,9 @@
       sealWhen.textContent = `Minted ${fmtDate(v.provenance.minted_at, true)}`;
       sealHash.textContent = v.provenance.hash;
       show(seal);
-      if (v.images_status === 'failed' && !(v.images || []).some(Boolean)) renders.classList.add('hidden');
-      else { show(renders); applyImages(v); }
+      show(renders);
+      renderGrid.classList.toggle('hidden', v.images_status === 'failed' && !(v.images || []).some(Boolean));
+      applyImages(v);
       renderCross(v);
       renderRefinement(v);
       renderOwner(v);
@@ -784,9 +785,17 @@
         img.src = assetUrl(u) + (v.refinement?.state === 'completed' ? (u.includes('?') ? '&' : '?') + 'refined=1' : '');
       });
       const allIn = (v.images || []).filter(Boolean).length >= renderSlots.length;
-      if (v.images_status === 'ready' || allIn) renderStatus.classList.add('hidden');
+      if (allIn) renderStatus.classList.add('hidden');
+      else if (v.images_status === 'ready') {
+        renderStatus.classList.remove('hidden');
+        renderStatus.textContent = 'Some renders are unavailable. Your venture is saved.';
+        renderSlots.forEach((s, i) => { if (!(v.images || [])[i]) s.classList.add('done'); });
+      }
       else if (v.images_status === 'failed') {
-        renderStatus.textContent = (v.images || []).some(Boolean) ? '' : 'Renders unavailable for this one.';
+        renderStatus.classList.remove('hidden');
+        renderStatus.textContent = (v.images || []).some(Boolean)
+          ? 'Some renders could not finish. Your venture is saved.'
+          : 'The image service could not finish these renders. Your venture is saved.';
         renderSlots.forEach(s => { if (!s.classList.contains('done')) s.classList.add('done'); });
       } else {
         const n = (v.images || []).filter(Boolean).length;
@@ -798,7 +807,7 @@
       stopPolling(); pollStart = Date.now();
       let delay = 2500;
       const tick = async () => {
-        if (Date.now() - pollStart > 150000) {
+        if (Date.now() - pollStart > 660000) {
           const note = refinement.querySelector('.refinement-note');
           if (venture.refinement?.state === 'pending' && note) note.textContent = 'Refinement is taking longer than usual. Refresh to check its progress.';
           else {
@@ -808,7 +817,7 @@
           return;
         }
         try {
-          const fresh = await api(`/api/ventures/${encodeURIComponent(venture.slug)}`);
+          const fresh = await api(`/api/ventures/${encodeURIComponent(venture.slug)}`, { signal: AbortSignal.timeout(10000) });
           const enteredCompleted = venture.refinement?.state !== 'completed' && fresh.refinement?.state === 'completed';
           if (enteredCompleted || (venture.refinement?.state === 'pending' && fresh.refinement?.state !== 'pending')) {
             refinementState = null;
@@ -1324,15 +1333,30 @@
     const resultList = h('div', { class: 'mix-results', 'aria-live': 'polite' });
     const combineStatus = h('p', { class: 'mix-status', role: 'status', 'aria-live': 'polite' });
     const combineButton = h('button', { class: 'btn primary', type: 'button', text: 'Generate hybrids →', disabled: true });
+    const customA = h('textarea', { id: 'mix-custom-a', class: 'mix-custom-input', rows: '3', maxlength: '600', placeholder: 'First idea, product, industry or mechanism…' });
+    const customB = h('textarea', { id: 'mix-custom-b', class: 'mix-custom-input', rows: '3', maxlength: '600', placeholder: 'Second idea—something unexpected to borrow from…' });
+    const customButton = h('button', { class: 'btn primary', type: 'button', text: 'Merge these two →', disabled: true });
+    customA.addEventListener('input', updateEligibility);
+    customB.addEventListener('input', updateEligibility);
+    customButton.addEventListener('click', () => {
+      if (!customButton.disabled) generateMix([customA.value.trim(), customB.value.trim()]);
+    });
     const researchButton = h('button', { class: 'btn primary', type: 'submit', text: 'Research the live edge →' });
-    const selectNote = h('p', { class: 'mix-select-note', text: 'Select 2–3 ingredients total, including at least one product trend.' });
+    const selectNote = h('p', { class: 'mix-select-note', text: 'Select 2–3 ingredients. Floor ventures are optional.' });
     const root = h('section', { class: 'view mix-page' },
       h('header', { class: 'mix-head' },
         h('div', { class: 'eyebrow', text: 'The Mix / 01' }),
         h('h1', {}, 'Steal a mechanism.', h('br'), 'Give it a new life.'),
-        h('p', { class: 'lead', text: 'Live product research meets ventures already on MANIFEST’s public Floor. Find the useful collision; then give it a first test.' }),
+        h('p', { class: 'lead', text: 'Merge two new ideas, borrow from live product research, or bring in a Floor venture. Find the useful collision; then give it a first test.' }),
         h('p', { class: 'mix-disclaimer', text: 'Sources support the ingredients, not the new hybrid’s performance. Floor signals are interest—not sales or proof of demand. Untested advantages are hypotheses; novelty and safety are not guaranteed.' })),
       conceptDisclosure(),
+      h('section', { class: 'mix-custom', 'aria-labelledby': 'mix-custom-title' },
+        h('h2', { id: 'mix-custom-title', text: 'Two new ideas. One unexpected merge.' }),
+        h('p', { class: 'mix-help', text: 'No Floor venture or research required. Your inputs are concepts, not verified market evidence.' }),
+        h('div', { class: 'mix-custom-fields' },
+          h('label', { for: 'mix-custom-a' }, 'Idea one', customA),
+          h('label', { for: 'mix-custom-b' }, 'Idea two', customB)),
+        customButton),
       h('form', { class: 'mix-research', onsubmit: async (e) => {
         e.preventDefault();
         const value = topic.value.trim();
@@ -1347,7 +1371,7 @@
         root.querySelector('.mix-output').classList.add('hidden');
         resultList.replaceChildren();
         try {
-          const data = await api('/api/mix/research', { method: 'POST', body: JSON.stringify({ topic: value }) });
+          const data = await api('/api/mix/research', { method: 'POST', signal: AbortSignal.timeout(110000), body: JSON.stringify({ topic: value }) });
           researchId = data.research_id;
           trends.splice(0, trends.length, ...(Array.isArray(data.trends) ? data.trends : []));
           selectedTrends.clear();
@@ -1379,10 +1403,13 @@
     function currentTotal() { return selectedTrends.size + selectedFloor.size; }
     function updateEligibility() {
       const count = currentTotal();
-      combineButton.disabled = busy || !researchId || selectedTrends.size < 1 || count < 2 || count > 3;
+      combineButton.disabled = busy || (selectedTrends.size > 0 && !researchId) || count < 2 || count > 3;
+      const a = customA.value.trim(), b = customB.value.trim();
+      customButton.disabled = busy || a.length < 3 || b.length < 3 || a.toLowerCase() === b.toLowerCase();
+      customA.disabled = busy; customB.disabled = busy;
       selectNote.textContent = !floor.length && count >= 1
         ? 'No public Floor ventures are available right now. You can still select multiple trends; this mix will have no Floor evidence.'
-        : `Selected ${count} of 3 ingredients · at least one trend required.`;
+        : `Selected ${count} of 3 ingredients · Floor ventures are optional.`;
       root.querySelectorAll('.mix-choice').forEach(btn => {
         const isSelected = btn.getAttribute('aria-pressed') === 'true';
         btn.disabled = busy || (!isSelected && count >= 3);
@@ -1473,16 +1500,22 @@
           : h('p', { text: 'No Floor evidence was included in this mix.' }),
         sourcesEl(data.sources)));
     }
-    combineButton.addEventListener('click', async () => {
-      if (combineButton.disabled || busy) return;
+    async function generateMix(customIdeas = null) {
+      if (busy || (!customIdeas && combineButton.disabled)) return;
       busy = true;
       combineButton.disabled = true;
       updateEligibility();
       combineStatus.textContent = 'Asking the Architect to make the collision concrete…';
+      root.querySelector('.mix-output').classList.remove('hidden');
+      root.querySelector('.mix-output').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const started = Date.now();
+      const clock = setInterval(() => {
+        combineStatus.textContent = `Exploring the mechanisms and testing the merge… ${Math.floor((Date.now() - started) / 1000)}s.`;
+      }, 1000);
       combineStatus.classList.add('caret');
       resultList.replaceChildren(h('div', { class: 'mix-skeleton' }, h('i'), h('i'), h('i')));
       try {
-        const data = await api('/api/mix/combine', { method: 'POST', body: JSON.stringify({
+        const data = await api('/api/mix/combine', { method: 'POST', signal: AbortSignal.timeout(110000), body: JSON.stringify(customIdeas ? { custom_ideas: customIdeas } : {
           research_id: researchId,
           trend_ids: [...selectedTrends],
           floor_slugs: [...selectedFloor],
@@ -1493,12 +1526,14 @@
         root.querySelector('.mix-output').scrollIntoView({ behavior: 'smooth', block: 'start' });
       } catch (error) {
         combineStatus.classList.remove('caret');
-        combineStatus.replaceChildren(h('span', { text: error.message }), ' ', h('button', { class: 'btn small', type: 'button', text: 'Try again', onclick: () => combineButton.click() }));
+        combineStatus.replaceChildren(h('span', { text: error.message }), ' ', h('button', { class: 'btn small', type: 'button', text: 'Try again', onclick: () => generateMix(customIdeas) }));
       } finally {
+        clearInterval(clock);
         busy = false;
         updateEligibility();
       }
-    });
+    }
+    combineButton.addEventListener('click', () => generateMix());
     async function loadFloor() {
       floorList.replaceChildren(h('div', { class: 'mix-skeleton' }, h('i'), h('i')));
       try {

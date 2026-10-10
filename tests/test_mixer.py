@@ -432,6 +432,61 @@ class MixRouteTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(expired.status_code, 410)
 
+    async def test_two_custom_inputs_work_without_floor_or_research(self) -> None:
+        owner = "custom-mix-owner-00000001"
+        with patch.object(server.mixer, "combine", new=AsyncMock(return_value=concepts())) as provider:
+            async with self.client() as client:
+                response = await client.post("/api/mix/combine", headers=self.headers(owner),
+                    json={"custom_ideas": ["Origami folding tool tray", "Library checkout tokens"]})
+                self.assertEqual(response.status_code, 200)
+                result = response.json()
+                self.assertEqual(result["floor"], [])
+                self.assertEqual(result["sources"], [])
+                self.assertTrue(result["mix_id"])
+                ingredients, floor = provider.await_args.args
+                self.assertEqual(floor, [])
+                self.assertEqual(len(ingredients), 2)
+                self.assertEqual(ingredients[0]["origin"], "creator_input")
+                self.assertIn("not sourced market evidence", ingredients[0]["evidence"])
+                selected = await client.post("/api/manifest", headers=self.headers(owner),
+                    json={"idea": "not a selected sentence", "mix_id": result["mix_id"]})
+                self.assertEqual(selected.status_code, 422)
+
+    async def test_partial_render_failure_is_terminal_not_an_endless_empty_slot(self) -> None:
+        storage = SimpleNamespace(
+            save_render=AsyncMock(return_value="/renders/synthetic.webp"),
+            update_venture=AsyncMock(),
+        )
+        row = {"id": "synthetic-render-check", "slug": "synthetic-render-check",
+               "image_prompts": ["mechanism view", "action view"], "grounding": {}}
+        with patch.object(server, "store", storage), patch.object(
+            server.llm, "generate_render", new=AsyncMock(side_effect=[
+                b"synthetic-image", RuntimeError("synthetic image failure")
+            ])
+        ):
+            await server._render_images(row)
+        fields = storage.update_venture.await_args.args[1]
+        self.assertEqual(fields["images_status"], "failed")
+        self.assertEqual(fields["images"], ["/renders/synthetic.webp", None])
+
+    async def test_custom_inputs_are_validated_before_provider_call(self) -> None:
+        owner = "custom-invalid-owner-00001"
+        bodies = [
+            {"custom_ideas": ["Same idea", " same   IDEA "]},
+            {"custom_ideas": ["", "Another idea"]},
+            {"custom_ideas": ["One idea"]},
+            {"custom_ideas": ["x"*601, "Another idea"]},
+            {"custom_ideas": ["First", "Second"], "trend_ids": ["unresearched"]},
+            {"custom_ideas": ["First", "Second", "Third", "Fourth"]},
+        ]
+        with patch.object(server.mixer, "combine", new=AsyncMock()) as provider:
+            async with self.client() as client:
+                for body in bodies:
+                    with self.subTest(body=body):
+                        response = await client.post("/api/mix/combine", headers=self.headers(owner), json=body)
+                        self.assertEqual(response.status_code, 422)
+            provider.assert_not_awaited()
+
     async def test_combine_rejects_duplicate_wrong_count_and_stale_ingredients(self) -> None:
         owner = "combine-owner-token-0000001"
         research_id = server._mix_save(

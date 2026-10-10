@@ -292,7 +292,9 @@ class SQLiteRestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(0.01)
 
-        self.assertEqual(calls, ["resumed render prompt"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("resumed render prompt", calls[0])
+        self.assertIn("distinctive working mechanism", calls[0])
         self.assertEqual(saved["images_status"], "ready")
         self.assertTrue(saved["images"][0])
 

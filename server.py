@@ -89,6 +89,8 @@ TRUST_VISITOR_HEADER = False
 from app import llm  # noqa: E402
 from app import architect as arch  # noqa: E402
 from app import mixer  # noqa: E402
+from app.render_brief import render_brief
+from app.streaming import HeartbeatStreamingResponse, with_heartbeats
 from app.partial_json import parse_partial  # noqa: E402
 from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
 from app.store import RENDER_LEASE_SECONDS, build_store, day_start_iso, hours_ago_iso, lease_expired  # noqa: E402
@@ -550,7 +552,7 @@ async def manifest(body: ManifestBody, request: Request):
             require_valid_plan(obj, idea)
             data = _normalize(obj)
             require_valid_plan(data, idea)
-            slug = unique_slug(data["name"], store.slug_exists)
+            slug = await asyncio.to_thread(unique_slug, data["name"], store.slug_exists)
             row = {
                 "id": venture_id,
                 "slug": slug, "owner_token": owner, "idea_raw": idea, "idea_hash": prov["hash"],
@@ -581,7 +583,7 @@ async def manifest(body: ManifestBody, request: Request):
             if body.request_id:
                 await _shielded_bounded_call(store.fail_manifest_request(owner, request_id))
 
-    return StreamingResponse(gen(), media_type="text/event-stream",
+    return HeartbeatStreamingResponse(with_heartbeats(gen()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -607,7 +609,7 @@ async def _render_images(v: dict) -> None:
     async def one(i: int, prompt: str):
         async with IMAGE_CONCURRENCY:
             try:
-                png = await llm.generate_render(prompt, v.get("accent") or "#e8eeff")
+                png = await llm.generate_render(render_brief(v, prompt, i), v.get("accent") or "#e8eeff")
                 if png:
                     if render_claim_id:
                         urls[i] = await worker_store.save_render(
@@ -626,7 +628,7 @@ async def _render_images(v: dict) -> None:
             await asyncio.gather(*(one(i, p) for i, p in enumerate(prompts)))
     except TimeoutError:
         print(f"[render] {v['slug']} timed out")
-    status = "ready" if any(urls) else "failed"
+    status = "ready" if urls and all(urls) else "failed"
     await persist({"images": urls, "images_status": status})
 
 
@@ -1179,9 +1181,10 @@ class ResearchBody(BaseModel):
 
 
 class CombineBody(BaseModel):
-    research_id: str = Field(min_length=1, max_length=100)
-    trend_ids: list[str] = Field(min_length=1, max_length=3)
+    research_id: str | None = Field(default=None, min_length=1, max_length=100)
+    trend_ids: list[str] = Field(default_factory=list, max_length=3)
     floor_slugs: list[str] = Field(default_factory=list, max_length=3)
+    custom_ideas: list[str] = Field(default_factory=list, max_length=3)
 
 
 @app.get("/api/mix/floor")
@@ -1208,12 +1211,17 @@ async def mix_research(body: ResearchBody, request: Request):
 @app.post("/api/mix/combine")
 async def mix_combine(body: CombineBody, request: Request):
     owner = _owner_token(request)
-    research = _mix_snapshot(body.research_id, "research", owner)
+    research = _mix_snapshot(body.research_id, "research", owner) if body.research_id else None
     trend_ids, slugs = body.trend_ids, body.floor_slugs
-    if (not 2 <= len(trend_ids) + len(slugs) <= 3
+    custom = [" ".join(idea.split()) for idea in body.custom_ideas]
+    if (not 2 <= len(trend_ids) + len(slugs) + len(custom) <= 3
             or len(set(trend_ids)) != len(trend_ids) or len(set(slugs)) != len(slugs)):
-        raise HTTPException(422, "Choose two or three different ingredients, including a market trend.")
-    by_id = {t["id"]: t for t in research["trends"]}
+        raise HTTPException(422, "Choose two or three different ideas, trends or Floor ventures.")
+    if any(not 3 <= len(idea) <= 600 for idea in custom) or len({idea.casefold() for idea in custom}) != len(custom):
+        raise HTTPException(422, "Enter different ideas, each between 3 and 600 characters.")
+    if trend_ids and not research:
+        raise HTTPException(422, "Research first to select sourced trends, or enter your own ideas.")
+    by_id = {t["id"]: t for t in research["trends"]} if research else {}
     if any(t not in by_id for t in trend_ids):
         raise HTTPException(422, "Choose trends from the current research.")
     floor = []
@@ -1225,6 +1233,11 @@ async def mix_combine(body: CombineBody, request: Request):
             raise HTTPException(404, "A selected venture is no longer on the public Floor.")
         floor.append(mixer.floor_brief(row))
     trends = [by_id[t] for t in trend_ids]
+    trends.extend({"id": f"custom-{i+1}", "title": f"Your idea {i+1}",
+                   "product": idea, "mechanism": "Infer a specific transferable mechanism from this idea.",
+                   "evidence": "Creator-supplied concept, not sourced market evidence or proven demand.",
+                   "source_date": None, "sources": [], "origin": "creator_input"}
+                  for i, idea in enumerate(custom))
     await _mix_rate(request)
     try:
         concepts = await mixer.combine(trends, floor)

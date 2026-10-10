@@ -45,7 +45,7 @@ Produce the keys IN THIS EXACT ORDER:
    "exists": the closest existing alternative, named only when confident it exists, and the concrete difference this venture proposes. Label an uncertain comparison unverified; if something very similar exists, say so plainly.
    "who_pays": the exact buyer, the painful moment that motivates a purchase, and a realistic estimated price point to test, not a claim of proven willingness to pay.
    "first_hundred": how the first one hundred dollars of revenue could happen, step by step in one or two sentences. Name the outreach channel and show the simple number of purchases times price; revenue is not profit or guaranteed demand.
-"image_prompts": array of exactly 2 strings, each a detailed prompt for a photorealistic product render. No text, logos, or words in the image. [1] the product alone on a dark studio backdrop with soft rim lighting; [2] the product in realistic use by a person in its real environment. Describe form, material, color (use the accent color), scale, and lighting.
+"image_prompts": array of exactly 2 strings for photorealistic speculative design renders. Art-direct this specific invention, not a generic stock product. Describe the surprising borrowed mechanism through distinctive geometry, connections, real materials, scale and purposeful details; express an ambitious unconventional form where unconstrained without changing the concept or inventing impossible function. [1] a hero view that makes the mechanism legible, using an open configuration, cutaway or close detail when useful; [2] the SAME design in action at the buyer's exact painful moment. Specify matching parts, proportions, materials and accent color in both. Choose lighting and setting that reveal function rather than defaulting to a dark box with glow. No text, logos, fake certifications, decorative screens or generic white plastic gadget shells.
 
 If the idea is weak or already exists, still build the best honest version of it and say the truth in grounding. Never flatter.
 
@@ -359,13 +359,15 @@ async def generate_render(prompt: str, accent: str = "#e8eeff") -> bytes | None:
     if provider == "openai":
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI()
+        client = AsyncOpenAI(timeout=180, max_retries=0)
         model = os.environ.get("IMAGE_MODEL", "gpt-image-1")
         quality = os.environ.get("IMAGE_QUALITY", "medium")   # low ($0.011) | medium ($0.042) | high
-        result = await client.images.generate(model=model, prompt=prompt, size="1024x1024", quality=quality, n=1)
-        import base64
-
-        return base64.b64decode(result.data[0].b64_json)
+        try:
+            result = await client.images.generate(model=model, prompt=prompt, size="1024x1024", quality=quality, n=1)
+            import base64
+            return base64.b64decode(result.data[0].b64_json)
+        finally:
+            await client.close()
     if provider == "pplx":
         from .generate_image import generate_image  # sandbox-only helper
 
