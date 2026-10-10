@@ -96,7 +96,7 @@ class RenderAccess:
         venture = await self.get_by_id(record["venture_id"])
         if venture and venture["owner_token"] == record["owner_token"]:
             return {"state": "completed", "venture": venture}
-        state = "failed" if record["failed"] else (
+        state = "retired" if record.get("retired") else "failed" if record["failed"] else (
             "unconfirmed" if lease_expired(record, "lease_until", None) else "pending")
         return {"state": state}
 
@@ -277,6 +277,16 @@ class SQLiteStore(RenderAccess):
                 self._db.execute("ALTER TABLE ventures ADD COLUMN path TEXT")
             if "splices" not in cols:
                 self._db.execute("ALTER TABLE ventures ADD COLUMN splices TEXT")
+            request_cols = {r[1] for r in self._db.execute("PRAGMA table_info(manifest_requests)")}
+            if "retired" not in request_cols:
+                self._db.execute("ALTER TABLE manifest_requests ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
+            self._db.executescript("""
+                CREATE TRIGGER IF NOT EXISTS fence_retired_manifest
+                BEFORE INSERT ON ventures
+                WHEN EXISTS (SELECT 1 FROM manifest_requests
+                             WHERE venture_id = NEW.id AND retired = 1)
+                BEGIN SELECT RAISE(ABORT, 'Manifest request retired.'); END;
+            """)
             self._db.commit()
 
     # -- helpers ------------------------------------------------------------
@@ -382,6 +392,27 @@ class SQLiteStore(RenderAccess):
                 (owner, request_id))
             self._db.commit()
 
+    async def retire_manifest_request(self, owner: str, request_id: str) -> dict | None:
+        """Serialize a permanent fence with every venture insert, across processes."""
+        with self._lock:
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                record = self._db.execute(
+                    "SELECT * FROM manifest_requests WHERE owner_token = ? AND request_id = ?",
+                    (owner, request_id)).fetchone()
+                if record:
+                    saved = self._db.execute("SELECT 1 FROM ventures WHERE id = ?",
+                                             (record["venture_id"],)).fetchone()
+                    if not saved and lease_expired(dict(record), "lease_until", None):
+                        self._db.execute(
+                            "UPDATE manifest_requests SET retired = 1 WHERE owner_token = ? AND request_id = ?",
+                            (owner, request_id))
+                self._db.commit()
+            except BaseException:
+                self._db.rollback()
+                raise
+        return await self.get_manifest_request(owner, request_id)
+
     async def create_reserved_venture(self, token: str, row: dict) -> dict:
         row = dict(row)
         row.setdefault("id", _new_id())
@@ -422,8 +453,14 @@ class SQLiteStore(RenderAccess):
         cols = ", ".join(enc.keys())
         qs = ", ".join("?" for _ in enc)
         with self._lock:
-            self._db.execute(f"INSERT INTO ventures ({cols}) VALUES ({qs})", list(enc.values()))
-            self._db.commit()
+            try:
+                self._db.execute(f"INSERT INTO ventures ({cols}) VALUES ({qs})", list(enc.values()))
+                self._db.commit()
+            except BaseException:
+                # A trigger abort rejects the statement, not the surrounding
+                # implicit transaction. Do not leave this connection wedged.
+                self._db.rollback()
+                raise
         return await self.get_by_id(row["id"])
 
     async def update_venture(self, venture_id: str, fields: dict) -> dict | None:
@@ -928,12 +965,12 @@ class SupabaseStore(RenderAccess):
             headers["Prefer"] = prefer
         r = await self._client.request(method, f"/rest/v1/{table}", params=params, json=json_body, headers=headers)
         if r.status_code >= 400:
-            if table == "manifest_requests":
+            if table in ("manifest_requests", "rpc/retire_manifest_request"):
                 try:
                     code = r.json().get("code")
                 except (ValueError, AttributeError):
                     code = None
-                if code in ("PGRST205", "42P01", "42501"):
+                if code in ("PGRST202", "PGRST205", "42P01", "42501"):
                     raise ManifestRecoveryUnavailable(
                         "Generation recovery setup is incomplete. Apply supabase/manifest-recovery.sql "
                         "to the configured Supabase project before generating ventures.")
@@ -960,6 +997,10 @@ class SupabaseStore(RenderAccess):
         await self._rest("PATCH", "manifest_requests", params={
             "owner_token": f"eq.{owner}", "request_id": f"eq.{request_id}"},
             json_body={"failed": True})
+
+    async def retire_manifest_request(self, owner: str, request_id: str) -> dict | None:
+        return await self._rest("POST", "rpc/retire_manifest_request", json_body={
+            "p_owner": owner, "p_request_id": request_id})
 
     async def reserve_generation(self, token: str, caller: str, hour_cap: int,
                                  day_cap: int, global_cap: int | None) -> str | None:

@@ -31,7 +31,7 @@ function fixture() {
   const context = {
     localStorage: { getItem: k => storage.get(k) || null, setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) },
     API: '', AbortSignal, TextDecoder, crypto: { randomUUID },
-    setTimeout: fn => { fn(); return 1; }, addEventListener() {},
+    setTimeout: fn => { fn(); return 1; }, addEventListener() {}, confirm: () => true,
     manifestBusy: false, pendingMixSentence: null, pendingMixId: null,
     orbWrap: node(), heroTag: node(), formingName: node(), formingStatus: node(), heroError: node(),
     h: (tag, attrs) => Object.assign(node(), { textContent: attrs?.text || '' }),
@@ -99,5 +99,49 @@ const done = `event: done\ndata: ${JSON.stringify(venture)}\n\n`;
   assert.equal(f.requests.filter(r => r.options.method === 'POST').length, 1);
   assert.equal(JSON.parse(f.requests[0].options.body).request_id, pending.request_id);
   assert.equal(f.context.pendingManifest().legacy, undefined);
+
+  // Retirement is explicit and lookup failures never discard the pending ID.
+  f = fixture();
+  f.context.rememberManifest(pending);
+  f.respond([new Error('Retirement response lost after commit')]);
+  await f.context.retireManifest(pending.request_id);
+  assert.equal(f.context.pendingManifest().request_id, pending.request_id);
+  assert.equal(f.requests[0].options.method, 'POST');
+  assert.match(f.requests[0].url, /\/retire$/);
+  f.respond([{ ok: true, json: async () => ({ state: 'retired' }) }, streamResponse(done)]);
+  await f.context.startManifest('A different workbench organizer');
+  assert.equal(f.completions.length, 1);
+  assert.notEqual(JSON.parse(f.requests.at(-1).options.body).request_id, pending.request_id);
+
+  // A successful retirement clears only that ID; a live request stays pending.
+  f = fixture();
+  f.context.rememberManifest(pending);
+  f.respond([{ ok: true, json: async () => ({ state: 'pending' }) }]);
+  await f.context.retireManifest(pending.request_id);
+  assert.equal(f.context.pendingManifest().request_id, pending.request_id);
+  f.respond([{ ok: true, json: async () => ({ state: 'retired' }) }]);
+  await f.context.retireManifest(pending.request_id);
+  assert.equal(f.context.pendingManifest(), null);
+
+  // Save-wins returns the original result, never POSTs another generation.
+  f = fixture();
+  f.context.rememberManifest(pending);
+  f.respond([{ ok: true, json: async () => ({ state: 'completed', venture }) }]);
+  await f.context.retireManifest(pending.request_id);
+  assert.equal(f.completions.length, 1);
+  assert.equal(f.context.pendingManifest(), null);
+  assert.equal(f.requests.length, 1);
+
+  // No retirement without the creator's explicit confirmation.
+  f = fixture();
+  f.context.rememberManifest(pending);
+  f.context.confirm = () => false;
+  await f.context.retireManifest(pending.request_id);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.context.pendingManifest().request_id, pending.request_id);
+
+  // The recoverable message exposes the action, not a new generation button.
+  f.context.showUnconfirmedManifest({ state: 'unconfirmed' }, pending.request_id);
+  assert.match(source, /text: 'Retire abandoned request'/);
   console.log('Submission recovery and safe pre-migration compatibility fixtures passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

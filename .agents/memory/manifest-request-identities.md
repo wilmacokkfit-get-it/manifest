@@ -14,8 +14,11 @@ that the completed quota charge was released.
 
 **How to apply:** Expired requests without a saved row remain unconfirmed, never
 automatically restarted. Check creator ownership and the saved result before
-interpreting failure flags. Any future retention/cleanup design must preserve
-permanent deduplication for saved requests and fence ambiguous unfinished work.
+interpreting failure flags. Explicit creator retirement may resolve abandonment
+only with a durable fence serialized against every save path, including work
+exempt from quotas. Keep the identity single-use after retirement; a completed
+save still wins and remains recoverable. Any retention/cleanup design must
+preserve permanent deduplication for saved requests and these fences.
 
 Preserve the original unidentified generation API while an external recovery
 migration is pending. Any browser compatibility submission must be explicitly

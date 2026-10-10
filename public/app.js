@@ -268,7 +268,7 @@
         if (response.ok) {
           result = await response.json();
           if (result.state === 'completed' && result.venture) return result;
-          if (result.state === 'failed' || result.state === 'unconfirmed') return result;
+          if (['failed', 'retired', 'unconfirmed'].includes(result.state)) return result;
         } else if (response.status === 503) {
           const error = await response.json();
           if (error.code === 'manifest_recovery_unavailable') return { state: 'unavailable', message: error.error };
@@ -289,6 +289,45 @@
     history.replaceState({}, '', href(`/v/${venture.slug}`));
     toast('Your saved venture was recovered.');
   }
+  function showUnconfirmedManifest(result, requestId) {
+    heroError.textContent = 'This request is still unconfirmed. Reconnect or submit the same sentence to check it again.';
+    if (result.state !== 'unconfirmed' || pendingManifest()?.legacy) return;
+    heroError.append(h('button', {
+      class: 'btn small', type: 'button', text: 'Retire abandoned request',
+      onclick: () => retireManifest(requestId),
+    }));
+  }
+  async function retireManifest(requestId) {
+    if (manifestBusy || pendingManifest()?.request_id !== requestId) return;
+    if (!confirm('Retire this abandoned request? If it has already saved, your venture will be recovered. Otherwise it will be permanently blocked from saving, so you can start a new request.')) return;
+    manifestBusy = true;
+    try {
+      const response = await fetch(API + `/api/manifest/requests/${encodeURIComponent(requestId)}/retire`, {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        if (error.code === 'manifest_recovery_unavailable') {
+          heroError.textContent = error.error;
+          return;
+        }
+        throw new Error('Retirement could not be confirmed.');
+      }
+      const result = await response.json();
+      if (result.state === 'completed' && result.venture) showRecoveredManifest(result.venture, requestId);
+      else if (result.state === 'retired') {
+        clearManifest(requestId);
+        heroError.textContent = 'The abandoned request is permanently retired. You can now submit a new idea.';
+      } else {
+        heroError.textContent = 'This request is still active and cannot be retired yet. Check it again after its waiting period.';
+      }
+    } catch (_) {
+      // A lost retirement response is ambiguous too. Keep the identity so GET
+      // recovery can confirm the durable fence before any new submission.
+      heroError.textContent = 'Retirement is unconfirmed. Reconnect or check the same request again; no new request has been sent.';
+    } finally { manifestBusy = false; }
+  }
   async function resumeManifestRecovery() {
     const pending = pendingManifest();
     if (!pending || manifestBusy) return;
@@ -306,13 +345,13 @@
     try {
       const result = await reconcileManifest(pending.request_id);
       if (result.state === 'completed') showRecoveredManifest(result.venture, pending.request_id);
-      else if (result.state === 'failed') {
+      else if (result.state === 'failed' || result.state === 'retired') {
         clearManifest(pending.request_id);
         heroError.textContent = 'The interrupted request did not save a venture. You can try again.';
       } else if (result.state === 'unavailable') {
         heroError.textContent = result.message;
       } else {
-        heroError.textContent = 'This request is still unconfirmed. Reconnect or submit the same sentence to check it again.';
+        showUnconfirmedManifest(result, pending.request_id);
       }
     } finally { manifestBusy = false; }
   }
@@ -332,8 +371,8 @@
       try {
         const result = await reconcileManifest(pending.request_id);
         if (result.state === 'completed') { showRecoveredManifest(result.venture, pending.request_id); return; }
-        if (result.state !== 'failed') {
-          heroError.textContent = 'Your previous request is still unconfirmed. Check it before starting a different venture.';
+        if (!['failed', 'retired'].includes(result.state)) {
+          showUnconfirmedManifest(result, pending.request_id);
           return;
         }
         clearManifest(pending.request_id);
@@ -406,7 +445,7 @@
         const replay = await res.json();
         if (wait.cancelled) return;
         if (replay.state === 'completed') { completeManifest(replay.venture); return; }
-        throw new Error(replay.state === 'failed' ?
+        throw new Error(['failed', 'retired'].includes(replay.state) ?
           'The interrupted request did not save a venture. Submit again to start a new request.' :
           'The original request is still running. Checking for its saved result…');
       }
@@ -465,10 +504,10 @@
       if (wait.cancelled) return;
       if (result.state === 'completed') { completeManifest(result.venture); return; }
       wait.finish('failed');
-      if (result.state === 'failed') clearManifest(requestId);
+      if (['failed', 'retired'].includes(result.state)) clearManifest(requestId);
       const failureMessage = err.name === 'AbortError' ?
         'The connection timed out before completion. Your request was checked; you can try again.' : err.message;
-      const message = result.state === 'unavailable' ? result.message : result.state === 'failed' ? failureMessage :
+      const message = result.state === 'unavailable' ? result.message : ['failed', 'retired'].includes(result.state) ? failureMessage :
         'The connection ended before completion. This preview is not a confirmed result. Reconnect or submit the same sentence to check again; no second venture will be generated.';
       if (moved) {
         liveStatus.textContent = message;
@@ -478,7 +517,10 @@
       } else {
         orbWrap.classList.remove('forming'); formingStatus.textContent = ''; heroTag.style.opacity = '';
         if (pendingManifest()?.legacy) showLegacyManifestNotice(pendingManifest());
-        else heroError.textContent = message;
+        else {
+          heroError.textContent = message;
+          if (result.state === 'unconfirmed') showUnconfirmedManifest(result, requestId);
+        }
       }
     } finally {
       wait.finish('interrupted');

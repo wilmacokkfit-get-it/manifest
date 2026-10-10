@@ -1,6 +1,7 @@
 """Provider-free disconnect recovery with disposable storage and no images."""
 import asyncio
 import json
+import sqlite3
 import tempfile
 import unittest
 import uuid
@@ -19,7 +20,104 @@ OTHER = "manifest-recovery-stranger-token"
 IDEA = "A compact workbench organizer"
 
 
-class ManifestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+class RetirementChecks:
+    """Run the same arbitration checks on SQLite and real PostgreSQL."""
+
+    async def retirement_fixture(self):
+        request_id = str(uuid.uuid4())
+        row = quota_fixtures.venture("retirement-" + request_id)
+        row["owner_token"] = OWNER
+        fingerprint = server.hashlib.sha256(json.dumps([IDEA, None], ensure_ascii=False).encode()).hexdigest()
+        await self.store.claim_manifest_request(OWNER, request_id, fingerprint, row["id"])
+        token = str(uuid.uuid4())
+        self.assertIsNone(await self.store.reserve_generation(token, token, 100, 100, 100))
+        return request_id, token, row
+
+    def expire_request(self, request_id):
+        if isinstance(self.store, SQLiteStore):
+            self.store._db.execute("UPDATE manifest_requests SET lease_until = ? WHERE request_id = ?",
+                                   ("2000-01-01T00:00:00Z", request_id))
+            self.store._db.commit()
+        else:
+            self.sql(f"update manifest_requests set lease_until = '2000-01-01' where request_id = '{request_id}';")
+
+    async def retire(self, request_id, owner=OWNER):
+        return await self.client.post(f"/api/manifest/requests/{request_id}/retire",
+                                     headers={"Cookie": f"{server.COOKIE}={owner}"})
+
+    async def test_retirement_fences_delayed_commit_and_keeps_id_single_use(self):
+        request_id, token, row = await self.retirement_fixture()
+        self.expire_request(request_id)
+        started, release = asyncio.Event(), asyncio.Event()
+        async def delayed_commit():
+            started.set()
+            await release.wait()
+            return await self.store.create_reserved_venture(token, row)
+        task = asyncio.create_task(delayed_commit())
+        await started.wait()
+        try:
+            response = await self.retire(request_id)
+            self.assertEqual(response.json(), {"state": "retired"})
+        finally:
+            release.set()
+        with self.assertRaisesRegex((RuntimeError, sqlite3.IntegrityError), "retired"):
+            await task
+        # Unlimited-owner saves take the same fence, without any admission.
+        with self.assertRaisesRegex((RuntimeError, sqlite3.IntegrityError), "retired"):
+            await self.store.create_venture(row)
+        self.assertIsNone(await self.store.get_by_id(row["id"]))
+        with patch.object(server.llm, "stream_venture_text", side_effect=AssertionError("No replay")):
+            response = await self.client.post("/api/manifest", json={"idea": IDEA, "request_id": request_id})
+        self.assertEqual(response.json(), {"state": "retired"})
+        self.assertEqual((await self.retire(request_id)).json(), {"state": "retired"})
+        self.assertIsNone(await self.store.reserve_generation("new-after-retirement", "new", 1, 1, 100))
+
+    async def test_commit_wins_retirement_recovers_without_refund_even_after_ledger_cleanup(self):
+        request_id, token, row = await self.retirement_fixture()
+        saved = await self.store.create_reserved_venture(token, row)
+        self.expire_request(request_id)
+        result = (await self.retire(request_id)).json()
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["venture"]["id"], saved["id"])
+        self.assertEqual(await self.store.reserve_generation("no-refund", token, 1, 1, 100), "hour")
+        if isinstance(self.store, SQLiteStore):
+            self.store._db.execute("delete from generation_admissions")
+            self.store._db.commit()
+        else:
+            self.sql("delete from generation_admissions;")
+        self.assertEqual((await self.retire(request_id)).json()["state"], "completed")
+        self.assertFalse((await self.store.get_manifest_request(OWNER, request_id))["retired"])
+
+    async def test_only_creator_can_retire_and_live_work_is_not_retired(self):
+        request_id, token, row = await self.retirement_fixture()
+        self.assertEqual((await self.retire(request_id, OTHER)).status_code, 404)
+        self.assertEqual((await self.retire(str(uuid.uuid4()), OTHER)).status_code, 404)
+        self.assertEqual((await self.retire(request_id)).json(), {"state": "pending"})
+        self.expire_request(request_id)
+        self.assertEqual((await self.retire(request_id, OTHER)).status_code, 404)
+        saved = await self.store.create_reserved_venture(token, row)
+        self.assertEqual(saved["id"], row["id"])
+
+    async def test_concurrent_retirement_and_commit_have_one_durable_winner(self):
+        for _ in range(4):
+            request_id, token, row = await self.retirement_fixture()
+            self.expire_request(request_id)
+            results = await asyncio.gather(
+                self.store.retire_manifest_request(OWNER, request_id),
+                self.store.create_reserved_venture(token, row), return_exceptions=True)
+            result = await self.store.manifest_result(await self.store.get_manifest_request(OWNER, request_id))
+            saved = await self.store.get_by_id(row["id"])
+            if result["state"] == "retired":
+                self.assertIsNone(saved)
+                self.assertIsInstance(results[1], (RuntimeError, sqlite3.IntegrityError))
+                self.assertIn("retired", str(results[1]))
+            else:
+                self.assertEqual(result["state"], "completed")
+                self.assertIsNotNone(saved)
+                self.assertNotIsInstance(results[1], Exception)
+
+
+class ManifestRecoveryTests(RetirementChecks, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="manifest-recovery-")
         self.store = SQLiteStore(self.directory.name)
@@ -53,6 +151,26 @@ class ManifestRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def output(self, *args, **kwargs):
         yield json.dumps(refined_output())
+
+    async def test_retirement_survives_reopening_and_fences_a_separate_connection(self):
+        request_id, token, row = await self.retirement_fixture()
+        late_worker = SQLiteStore(self.directory.name)
+        self.expire_request(request_id)
+        try:
+            self.assertEqual((await self.retire(request_id)).json()["state"], "retired")
+            reopened = SQLiteStore(self.directory.name)
+            try:
+                record = await reopened.get_manifest_request(OWNER, request_id)
+                self.assertEqual((await reopened.manifest_result(record))["state"], "retired")
+            finally:
+                reopened._db.close()
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "retired"):
+                await late_worker.create_reserved_venture(token, row)
+            admission = late_worker._db.execute(
+                "select consumed from generation_admissions where token = ?", (token,)).fetchone()
+            self.assertEqual(admission["consumed"], 0)
+        finally:
+            late_worker._db.close()
 
     async def test_disconnect_before_text_and_during_stream_releases_only_pending_charge(self):
         for partial in (False, True):
@@ -259,7 +377,7 @@ class SupabaseRecoveryAdapterTests(unittest.IsolatedAsyncioTestCase):
             await store._client.aclose()
 
 
-class PostgresManifestRecoveryTests(unittest.IsolatedAsyncioTestCase):
+class PostgresManifestRecoveryTests(RetirementChecks, unittest.IsolatedAsyncioTestCase):
     """Real disposable PG transactions behind the Supabase HTTP adapter."""
 
     # Reuse the existing isolated-cluster bootstrap (no environment credentials).
@@ -304,17 +422,36 @@ class PostgresManifestRecoveryTests(unittest.IsolatedAsyncioTestCase):
             p.stop()
 
     async def transport(self, request):
+        if request.url.path.endswith("/rpc/retire_manifest_request"):
+            body = json.loads(request.content)
+            owner = body["p_owner"].replace("'", "''")
+            request_id = body["p_request_id"].replace("'", "''")
+            output = await asyncio.to_thread(self.sql,
+                f"set role service_role; select public.retire_manifest_request('{owner}', '{request_id}');")
+            return httpx.Response(200, json=json.loads(output))
         if "/rpc/" in request.url.path:
             return await quota_fixtures.PostgresAdmissionTests.transport(self, request)
         def quote(value):
+            if value is None:
+                return "NULL"
             if isinstance(value, bool):
                 return "true" if value else "false"
             return "'" + str(value).replace("'", "''") + "'"
         table = request.url.path.rsplit("/", 1)[1]
         self.assertIn(table, ("manifest_requests", "ventures"))
         if request.method == "POST":
-            self.assertEqual(table, "manifest_requests")
             body = json.loads(request.content)
+            if table == "ventures":
+                # Exercise the real direct-insert path used by unlimited owners.
+                values = [("'" + json.dumps(v).replace("'", "''") + "'::jsonb")
+                          if isinstance(v, (dict, list)) else quote(v) for v in body.values()]
+                try:
+                    output = await asyncio.to_thread(self.sql,
+                        f"set role service_role; with rows as (insert into ventures ({','.join(body)}) "
+                        f"values ({','.join(values)}) returning *) select jsonb_agg(to_jsonb(rows)) from rows;")
+                    return httpx.Response(201, json=json.loads(output))
+                except RuntimeError as exc:
+                    return httpx.Response(400, json={"message": str(exc)})
             self.assertEqual(set(body), {"owner_token", "request_id", "fingerprint", "venture_id", "lease_until"})
             query = (
                 f"with rows as (insert into manifest_requests ({','.join(body)}) values "
@@ -409,6 +546,8 @@ class PostgresManifestRecoveryTests(unittest.IsolatedAsyncioTestCase):
                           "update manifest_requests set failed = true",
                           "delete from manifest_requests",
                           "insert into manifest_requests(owner_token,request_id,fingerprint,venture_id,lease_until) "
-                          f"values ('x','y','h','{uuid.uuid4()}', now())"):
+                          f"values ('x','y','h','{uuid.uuid4()}', now())",
+                          "select retire_manifest_request('x','y')",
+                          "select fence_retired_manifest()"):
                 with self.assertRaisesRegex(RuntimeError, "permission denied"):
                     self.sql(f"set role {role}; {query};")

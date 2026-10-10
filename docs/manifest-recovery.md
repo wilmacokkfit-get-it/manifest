@@ -44,7 +44,7 @@ the worker failed or its lease expired. A lost save response therefore cannot re
 a completed charge or create a duplicate. Request records are not expired/deleted
 with the short-lived quota ledger.
 
-States are `pending`, `completed` (with the creator's venture), `failed` (worker
+States are `pending`, `completed` (with the creator's venture), `retired`, `failed` (worker
 finished without a saved row), or `unconfirmed` (expired/abandoned work without
 proof of completion). A lease expiring is not proof that an ambiguous remote
 commit failed. Unknown states remain recoverable rather than restarting.
@@ -54,6 +54,31 @@ creator's next explicit submission can use a new UUID. For an unconfirmed reques
 submitting the original sentence reuses the UUID safely; changing the sentence is
 blocked until the original result is reconciled. The browser restores the pending
 sentence and mix reference after reload.
+
+## Explicit retirement after a crash
+
+Once a request's five-minute lease expires, its creator can choose **Retire
+abandoned request** and confirm the permanent action. The creator-only
+`POST /api/manifest/requests/{UUID}/retire` never generates anything. It shares
+the commit transaction lock, checks for a saved venture first, and otherwise
+sets a permanent `retired` tombstone. A database insert trigger rejects late
+saves for that venture ID, both with quota reservations and for unlimited
+app-owner generation. Lease expiry merely enables this explicit action; it is
+not itself evidence of failure. No admission is refunded by retirement.
+
+If the save wins the race, the original result is recovered. If retirement wins,
+the original UUID remains single-use and the browser may clear it only after
+confirming `retired`. Lost/offline retirement responses preserve the ID and are
+resolved by lookup, including after reload. Live work returns `pending`, while
+missing and other creators' requests return identical 404s. Already-saved
+ventures remain recoverable even after quota ledger cleanup.
+
+**Existing Supabase installations must reapply `supabase/manifest-recovery.sql`**
+to install the retirement column, RPC and atomic insert fence together. This
+additive transaction changes no ventures and removes no data. Before it is
+applied, the retirement endpoint fails explicitly and retains the pending
+request; existing generation and saved-result recovery still work. Do not
+install the retirement RPC without its commit trigger.
 
 ## Checks
 

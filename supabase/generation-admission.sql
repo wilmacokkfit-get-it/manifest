@@ -95,6 +95,9 @@ begin
     'image_prompts', '[]'::jsonb, 'images', '[]'::jsonb,
     'status', 'ready', 'images_status', 'failed', 'visibility', 'private'
   ) || p_row);
+  -- manifest-recovery.sql installs a BEFORE INSERT retirement fence sharing
+  -- this lock. Keep the insert and admission consumption in this transaction;
+  -- a retired request must roll both back, including delayed RPCs.
   insert into ventures select v.*;
   update generation_admissions
     set consumed = true, admitted_at = clock_timestamp(), venture_id = v.id

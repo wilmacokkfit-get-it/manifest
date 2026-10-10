@@ -474,6 +474,21 @@ async def manifest_request(request_id: uuid.UUID, request: Request):
                         headers={"Cache-Control": "private, no-store", "Vary": "Cookie"})
 
 
+@app.post("/api/manifest/requests/{request_id}/retire")
+async def retire_manifest_request(request_id: uuid.UUID, request: Request):
+    record = await _manifest_record(request, str(request_id))
+    if not record:
+        raise HTTPException(404, "Request not found.")
+    # The creator was resolved from server-side cookie/auth identity, never
+    # from a caller-supplied owner. The store atomically arbitrates late saves.
+    record = await _shielded_bounded_call(
+        store.retire_manifest_request(record["owner_token"], str(request_id)))
+    if not record:
+        raise HTTPException(404, "Request not found.")
+    return JSONResponse(await _manifest_recovery_view(record, request),
+                        headers={"Cache-Control": "private, no-store", "Vary": "Cookie"})
+
+
 @app.post("/api/manifest")
 async def manifest(body: ManifestBody, request: Request):
     idea = " ".join(body.idea.split())
