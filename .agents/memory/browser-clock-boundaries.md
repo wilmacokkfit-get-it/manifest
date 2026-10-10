@@ -15,3 +15,14 @@ route responses also cannot exercise feedback between incremental SSE chunks.
 clock and retain fake numeric start/end values. Use a secure synthetic origin
 because request identity creation depends on secure-context crypto APIs.
 Synthetic browser checks do not verify a hosting proxy's idle behavior.
+
+Keep raw HTTP wait measurements separate from creator-UI measurements when
+testing a published proxy. Do not use real generation requests as probes.
+
+**Why:** A client watchdog can end the UI before the host would disconnect;
+provider work also adds unrelated latency and may consume quotas or create
+durable records, making a hosting experiment both ambiguous and unsafe.
+
+**How to apply:** Use disposable synthetic upstream bytes and real clocks;
+correlate client disconnects with server cleanup logs before naming a host
+timeout boundary. Successful waits establish lower bounds, not unlimited waits.

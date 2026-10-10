@@ -95,6 +95,7 @@ from app.partial_json import parse_partial  # noqa: E402
 from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
 from app.store import RENDER_LEASE_SECONDS, build_store, day_start_iso, hours_ago_iso, lease_expired  # noqa: E402
 from app.owner_auth import app_owner_token, is_app_owner, router as owner_auth_router  # noqa: E402
+from app.wait_probe import router as wait_probe_router
 
 store = build_store()
 
@@ -108,6 +109,7 @@ async def lifespan(app):
 
 app = FastAPI(title="MANIFEST", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.include_router(owner_auth_router)
+app.include_router(wait_probe_router)
 
 PUBLIC = ROOT / "public"
 _index_cache: dict = {"mtime": 0.0, "html": ""}

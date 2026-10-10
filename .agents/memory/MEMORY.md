@@ -13,3 +13,4 @@
 - [Generation quality and latency](generation-quality-latency.md) — faster reasoning is opt-in until fixed-input checks preserve explicit constraints.
 - [Manifest request identities](manifest-request-identities.md) — request IDs outlive quota leases; saved ventures, not cleanup flags, determine completion.
 - [Browser clock boundaries](browser-clock-boundaries.md) — fake clocks discard User Timing by default; preserve the native buffer and keep streaming tests provider-free.
+- [Deployment task handoff](deployment-task-handoff.md) — apply isolated task changes before republishing; verify a backend marker, not just build success.

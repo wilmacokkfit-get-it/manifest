@@ -39,4 +39,6 @@ These are browser integration checks, not a hosting proxy experiment. They do
 not establish the published host's idle timeout or behavior when real upstream
 connections disconnect. A future production check must read the deployment
 instructions first and use disposable synthetic endpoints, not real ventures
-or provider calls.
+or provider calls. The opt-in endpoint and real-clock runner are described in
+[published-wait-probe.md](published-wait-probe.md). Published measurements require
+temporary enablement and republishing; local checks are not production evidence.
