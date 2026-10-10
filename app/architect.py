@@ -18,6 +18,7 @@ import os
 import re
 from collections import defaultdict
 from typing import Any
+from app.creation_standard import COMPARATIVE_STRESS_TEST
 
 STOP = set("""a an the and or of for to in on at by with from into over under about your you my our their its it this
 that these those is are be was were been being as if then than so but not no yes do does did done can could will would
@@ -203,6 +204,9 @@ Then write 2 or 3 CROSSBREEDS: take two real ventures from FACTS and splice them
 Rules: Only use ventures, asks, counts, and signals present in FACTS as evidence. New mechanisms and combinations may be creative hypotheses: do not suppress a plausible twist just because it is untested. Keep observed patterns distinct from proposed benefits; interest is not sales, and never invent measured gains. Equal performance can justify a hybrid if cost, repairability, accessibility or another constraint improves. Require a credible causal explanation; never invent a rationale for impossible physics. Safety-critical prototypes require qualified review before functional testing. If a pattern in FACTS is weak, skip it; fewer honest readings beat more padded ones. Never flatter. Never say "exciting", "synergy", "ecosystem", "leverage", "unlock". Write like a foreman reading a jobsite, not a consultant. Return ONE JSON object: {"readings": [...], "crossbreeds": [...]} and nothing else."""
 
 
+ARCHITECT_SYSTEM += "\n\n" + COMPARATIVE_STRESS_TEST
+
+
 async def write_readings(facts: dict) -> tuple[list[dict], list[dict]]:
     """Ask the engine to write readings (and crossbreeds) over the facts, then validate every reference against real rows."""
     from . import llm
@@ -300,6 +304,9 @@ Return ONE JSON object, nothing else:
    "first_test": "1-2 sentences: cheapest safe side-by-side test against the normal way on the same task, proposed measurable pass/fail threshold and what to revise if it fails",
    "sentence": "ONE sentence, under 25 words, a person could type into MANIFEST to manifest this hybrid as its own venture"}
 ]}"""
+
+
+CROSSBREED_SYSTEM += "\n\n" + COMPARATIVE_STRESS_TEST
 
 
 def crossbreed_message(host: dict, donor_venture: dict | None, lateral_field: str | None) -> str:

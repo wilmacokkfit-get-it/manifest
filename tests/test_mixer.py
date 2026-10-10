@@ -10,6 +10,7 @@ import time
 import unittest
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -236,6 +237,26 @@ class MixerUnitTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(malformed=malformed), self.assertRaises(ValueError):
                 mixer.clean_concepts({"concepts": malformed})
 
+    async def test_research_requests_current_evidence_and_private_mechanism_analysis(self) -> None:
+        create = AsyncMock(return_value=SimpleNamespace(
+            status="completed", output_text="{}",
+            model_dump=lambda: {"output": []},
+        ))
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "synthetic-test-key"}), patch(
+            "openai.AsyncOpenAI", return_value=client
+        ), patch.object(mixer, "clean_trends", return_value=[trend("trend-1")]):
+            await mixer.research("Repairable tools")
+        request = create.await_args.kwargs
+        self.assertEqual(request["tool_choice"], "required")
+        self.assertEqual(request["tools"][0]["type"], "web_search")
+        for phrase in (
+            "Privately reverse-engineer", "root cause", "critical dependency",
+            "source actually verifies", "behind the scenes", "hypotheses",
+            "last six months", "Hard maximum characters",
+        ):
+            self.assertIn(phrase, request["instructions"])
+
     async def test_combine_requests_and_returns_comparative_hypotheses(self) -> None:
         response = type("Response", (), {
             "status": "completed", "output_text": json.dumps({"concepts": concepts()})
@@ -254,6 +275,12 @@ class MixerUnitTests(unittest.IsolatedAsyncioTestCase):
             "explicitly label an untested benefit",
             "same task and conditions",
             "tradeoff or failure",
+            "strongest realistic original",
+            "original still wins",
+            "falsifiable side-by-side test",
+            "not originality",
+            "invent a proposed trend",
+            "main adoption friction",
         ):
             self.assertIn(phrase, instructions)
         self.assertTrue(all(c["why_it_does"].startswith("Hypothesis:") for c in result))

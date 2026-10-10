@@ -5,9 +5,51 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app import architect, llm
+from app.creation_standard import COMPARATIVE_STRESS_TEST
+from app.plan_quality import blocking_findings
 
 
 class CreationStandardTests(unittest.IsolatedAsyncioTestCase):
+    def test_stress_test_reaches_every_creation_and_build_prompt(self):
+        for prompt in (
+            llm.SYSTEM_PROMPT, llm.PRESERVE_SYSTEM_PROMPT,
+            llm.REFINEMENT_SYSTEM_PROMPT, llm.PATH_SYSTEM_PROMPT,
+            architect.ARCHITECT_SYSTEM, architect.CROSSBREED_SYSTEM,
+        ):
+            with self.subTest(prompt=prompt[:60]):
+                self.assertIn(COMPARATIVE_STRESS_TEST, prompt)
+        for requirement in (
+            "strongest realistic original", "not a straw man",
+            "weakest assumption", "original still wins",
+            "falsifiable side-by-side test", "Never force superiority",
+            "not originality", "safe proxy test",
+            "causal fit and useful surprise",
+            "dependency that must",
+            "Explain the adaptation",
+            "Original wins when:",
+            "privately reverse-engineer",
+            "any new pain it creates",
+            "do not\nclaim live trend knowledge",
+            "decomposition behind the scenes",
+            "Do not only follow existing trends",
+            "'observed trend' from 'proposed trend'",
+            "why others might copy it",
+            "does not require existing adoption",
+        ):
+            self.assertIn(requirement, COMPARATIVE_STRESS_TEST)
+
+    def test_unconventional_hypothesis_is_not_itself_blocked(self):
+        concept = {
+            "description": "A hypothesis: a tool organizer borrows library checkout tokens "
+                "to make missing slots visible without electronics. The original loose "
+                "tray still wins if checkout friction exceeds the time saved.",
+            "roadmap": [{"action": "Compare cardboard mockups",
+                "where": "Measure return errors and retrieval time against the original tray."}],
+            "grounding": {"first_hundred": "Sell and deliver five organizers "
+                "at a proposed $20 each: $100 revenue, not profit."},
+        }
+        self.assertEqual(blocking_findings(concept, "Unconventional library/tool merge"), [])
+
     def test_shared_standard_reaches_generation_refinement_and_selected_mix(self):
         for prompt in (
             llm.SYSTEM_PROMPT,

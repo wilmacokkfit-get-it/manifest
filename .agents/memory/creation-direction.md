@@ -13,7 +13,31 @@ Keep twists, merges and lateral invention; improve them rather than flattening t
 
 **Why:** The creator clarified: "I want it to still do the twists and merges ... like the mix part ... but I want them better and if they aren't factual give why they would work better or equal to the normal way."
 
-**How to apply:** Preserve the core problem and explicit non-negotiable constraints without suppressing new mechanisms. Compare against the normal approach, give the causal argument, label assumptions and unproven benefits as hypotheses, explain tradeoffs and propose a side-by-side test. Preserve selected Mix mechanisms during handoff.
+**How to apply:** Preserve the core problem and explicit non-negotiable constraints without suppressing new mechanisms. Compare against the strongest realistic original approach, explain its specific bottleneck and the hybrid's causal response, label assumptions and unproven benefits as hypotheses, and identify where the original still wins. Propose a fair side-by-side test that can disprove the advantage. Preserve selected Mix mechanisms during handoff.
+
+Safety checks should constrain hazardous execution and unsupported claims, not flatten unconventional concepts.
+
+**Why:** The creator reiterated that they want unique, nonconventional approaches and merges kept, with sharper, more intuitive stress tests of why the proposed approach could be better and why the original is worse for that use case.
+
+**How to apply:** Preserve the inventive mechanism while using nonfunctional tests or qualified review for risky implementation. Do not manufacture superiority or remove genuine safety gates.
+
+Cross-industry borrowing should transfer the actual causal mechanism, not an industry's name or aesthetic.
+
+**Why:** The creator confirmed the direction and reiterated that mechanisms from other industries should be "insanely good" with "sharper more thought put into it."
+
+**How to apply:** Assess materially different borrowed mechanisms, identify the donor conditions that make them work, and explain the adaptation needed in the host. Favor useful surprise with a credible causal fit.
+
+Reverse-engineer existing concepts and pain points before proposing transfers; keep most analysis behind the scenes and show only relevant conclusions.
+
+**Why:** The creator wants ideas more aware of current trends, with the original mechanism and pain point understood first, and an honest explanation of which pains the new approach improves or worsens.
+
+**How to apply:** Use dated source evidence for current-trend claims, not invented freshness. Distinguish root causes from symptoms and new problems introduced by the merge. Expose the chosen mechanism, concise comparison and decisive test, not internal alternative candidates or decomposition.
+
+MANIFEST should invent potential trends as well as understand and combine existing ones.
+
+**Why:** The creator explicitly corrected a follow-trends-only interpretation: "I want the AI to invent trends. I want to be able to do all of that."
+
+**How to apply:** Allow new habits, categories, rituals and business models without requiring prior adoption. Explain the initial adopter, reason to participate, copying mechanism and adoption friction. Label these proposed trends, distinct from sourced observations; never promise that they will become trends.
 
 Treat prompt standards as guidance, not verified output guarantees.
 

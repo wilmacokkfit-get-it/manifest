@@ -24,6 +24,7 @@ import zlib
 from contextlib import aclosing
 from functools import wraps
 from typing import AsyncIterator
+from app.creation_standard import COMPARATIVE_STRESS_TEST
 
 SYSTEM_PROMPT = """You are the engine inside MANIFEST, a product that turns one sentence into a fully formed venture.
 
@@ -35,7 +36,7 @@ Produce the keys IN THIS EXACT ORDER:
 
 "name": 1-2 words. Brandable, easy to say, not a pun, not a real famous brand. No suffixes like -ify, -ly, AI, Hub, Labs, Pro.
 "tagline": 4-12 words. One clean sentence fragment that makes the product obvious. No cliches.
-"description": 2-3 sentences. What it is, who it is for, the specific mechanism that makes it work, and why it beats the current workaround. Concrete nouns, not adjectives standing in for a mechanism.
+"description": 2-3 sentences. What it is, who it is for, the specific mechanism that makes it work, and why it could improve on or match the current workaround. Concrete nouns, not adjectives standing in for a mechanism.
 "category": 2-3 words, e.g. "Jobsite tools", "Home irrigation", "Consumer kitchen".
 "accent": one hex color (like "#d9a441") that suits this product. Saturated enough to glow on a near-black background, never white, never gray.
 "tiers": array of exactly 3 objects, in order, with "label" values exactly "The Lean Build", "The Real Product", "The Empire". Each has "title" (2-5 words) and "description" (2 sentences: what gets built at this level, and a rough estimated cost range or effort to make it real). Start with the cheapest useful test, then a repeatable product, then a credible expansion conditional on evidence, not a fantasy empire.
@@ -61,6 +62,12 @@ CREATION STANDARD:
 - Be concise and useful. Embed these judgments in the existing fields; do not add scores, extra keys, a reasoning transcript or marketing filler.
 
 VARIETY IS MANDATORY. Broad or vague sentences (an industry name, a category, "an app for X", "a money making app") have a hundred possible ventures inside them. Never take the first obvious interpretation. Pick one specific wedge: a specific customer, a specific painful moment in their day, a specific thing they already pay for badly. Where everyone expects software, consider a physical product, a service, a kit, a subscription box, a marketplace, a tool for pros, a franchise, a media brand. For broad ideas, vary customer, form and name across generations. For explicit product ideas, preserve the requested product and vary only unconstrained details. You will be given an ANGLE to build from and a list of names and concepts to AVOID. Use the angle where compatible with the creator's explicit intent, and avoid duplicating prior names or lightly rewording their concepts."""
+
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+    "\n\nVARIETY IS MANDATORY.",
+    "\n\n" + COMPARATIVE_STRESS_TEST + "\n\nVARIETY IS MANDATORY.",
+    1,
+)
 
 ANGLES = [
     "a physical product you can hold, not software",
@@ -433,6 +440,7 @@ Produce the keys IN THIS EXACT ORDER:
 "watch_out": one sentence on the most common way people blow this specific plan.
 """
 
+PATH_SYSTEM_PROMPT += "\n\n" + COMPARATIVE_STRESS_TEST
 
 def _path_user_message(venture: dict, tier_index: int) -> str:
     tier = (venture.get("tiers") or [{}] * 3)[tier_index]
