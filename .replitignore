@@ -1,1 +1,3 @@
 /generated-artifacts/
+/test-results/
+/playwright-report/

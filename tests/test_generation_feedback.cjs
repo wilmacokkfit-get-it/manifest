@@ -15,6 +15,7 @@ const context = {
     measure: (name, timing) => measurements.push({ name, ...timing }),
   },
   AbortController,
+  activeGenerationWaits: new Set(),
   setInterval: fn => { intervals.set(++id, fn); return id; },
   clearInterval: i => intervals.delete(i),
   setTimeout: fn => { deadlines.set(++id, fn); return id; },

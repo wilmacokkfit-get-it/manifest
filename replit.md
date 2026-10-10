@@ -6,6 +6,8 @@ This imported project keeps its original FastAPI backend, vanilla HTML/CSS/JS fr
 - Command: `python -m uvicorn server:app --host 0.0.0.0 --port 5000`.
 - Open the web preview at `/`. Check `/api/health` for storage and provider settings.
 - Python dependencies are listed in `requirements.txt`.
+- Provider-free Chromium waiting/disconnect tests: `npm ci && npm run test:browser`.
+  See `docs/browser-waiting-tests.md`; the tests intercept all networking.
 - SQLite data and locally generated images live under `data/`, which is ignored by Git. Do not delete this folder if you need to retain workspace data.
 
 ## After task merges

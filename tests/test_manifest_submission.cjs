@@ -35,7 +35,7 @@ function fixture() {
     h: node, mount() {}, href: path => path, toast: message => errors.push(message),
     history: { replaceState() {} },
     VentureView: () => ({ ...node(), update() {}, complete: data => completions.push(data) }),
-    generationWait: () => ({ signal: new AbortController().signal, first() {}, finish() {}, dispose() {} }),
+    generationWait: () => ({ signal: new AbortController().signal, first() {}, finish() {}, pause() {}, dispose() {} }),
     fetch: async (url, options) => {
       requests.push({ url, options });
       const next = responses.shift();

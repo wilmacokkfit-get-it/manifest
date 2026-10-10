@@ -1,0 +1,29 @@
+{
+  "name": "workspace",
+  "version": "1.0.0",
+  "description": "One sentence in. A venture out.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "node tests/test_generation_feedback.cjs && node tests/test_manifest_submission.cjs && node tests/test_manifest_recovery.cjs",
+    "test:browser": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wilmacokkfit-get-it/Manifest.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/wilmacokkfit-get-it/Manifest/issues"
+  },
+  "homepage": "https://github.com/wilmacokkfit-get-it/Manifest#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.64.0"
+  }
+}

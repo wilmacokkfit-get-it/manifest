@@ -48,17 +48,22 @@
       headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
     });
     let data = null;
-    try { data = await res.json(); } catch (_) {}
+    try { data = await res.json(); } catch (error) {
+      opts.signal?.throwIfAborted();
+      if (error.name === 'AbortError') throw error;
+      if (res.ok) throw new Error('The response ended before valid data arrived. Please check the saved result before retrying.');
+    }
     if (!res.ok) throw new Error((data && data.error) || 'Something went wrong.');
     return data;
   }
   const assetUrl = (u) => (u && u.startsWith('/') ? API + u : u);
 
   // Timings are local Performance entries, not idea text or visitor analytics.
+  const activeGenerationWaits = new Set();
   function generationWait(operation, paint, limitMs = 210000) {
     const started = performance.now();
     const controller = new AbortController();
-    let firstText = false, stopped = false;
+    let firstText = false, stopped = false, cancelled = false;
     const tick = () => {
       const seconds = Math.floor((performance.now() - started) / 1000);
       paint(`${firstText ? 'Writing' : 'Considering your idea'}… ${seconds}s. ${seconds >= 30 ? 'Still working; text generation has a two-minute limit.' : 'Text appears when it is ready.'}`);
@@ -67,16 +72,21 @@
     const timer = setInterval(tick, 1000);
     const deadline = setTimeout(() => controller.abort(), limitMs);
     const measure = (suffix) => performance.measure(`manifest.${operation}.${suffix}`, { start: started, end: performance.now() });
-    return {
+    const wait = {
       signal: controller.signal,
+      get cancelled() { return cancelled; },
       first() { if (!firstText) { firstText = true; measure('first-visible-text'); tick(); } },
       finish(outcome = 'completed') {
         if (stopped) return;
         stopped = true; clearInterval(timer); clearTimeout(deadline);
         measure(outcome);
       },
-      dispose() { controller.abort(); },
+      cancel() { cancelled = true; wait.finish('interrupted'); wait.dispose(); },
+      pause() { clearInterval(timer); clearTimeout(deadline); controller.abort(); },
+      dispose() { activeGenerationWaits.delete(wait); wait.pause(); },
     };
+    activeGenerationWaits.add(wait);
+    return wait;
   }
 
   // ---------- routing ----------
@@ -106,7 +116,7 @@
     if (!a) return;
     e.preventDefault();
     const route = a.dataset.route;
-    if (route === '/' && currentRoute() === '/') { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    if (route === '/' && currentRoute() === '/' && !activeView) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
     go(route);
   });
   window.addEventListener('popstate', render);
@@ -127,6 +137,9 @@
   }
 
   function render() {
+    // Route changes abandon browser work, not the server's durable request.
+    // Late callbacks must not remount the old view or overwrite the new route.
+    for (const wait of activeGenerationWaits) wait.cancel();
     const route = currentRoute();
     setAccent(null);
     if (route === '/') { mount(null, '/'); resetHero(); checkReveals(); return; }
@@ -368,6 +381,7 @@
       }
       if (res.headers.get('content-type')?.includes('application/json')) {
         const replay = await res.json();
+        if (wait.cancelled) return;
         if (replay.state === 'completed') { completeManifest(replay.venture); return; }
         throw new Error(replay.state === 'failed' ?
           'The interrupted request did not save a venture. Submit again to start a new request.' :
@@ -379,6 +393,7 @@
       let done = false;
       while (!done) {
         const { value, done: rd } = await reader.read();
+        if (wait.cancelled) return;
         if (rd) break;
         buf += dec.decode(value, { stream: true });
         let idx;
@@ -411,19 +426,26 @@
       if (!done) throw new Error('The connection ended before completion. This preview is not a confirmed result. Check your ventures before trying again.');
       await reader.cancel();
     } catch (err) {
+      if (wait.cancelled) return;
       // Stop the old stream before lookup, but never POST another generation.
       if (reader) { try { await reader.cancel(); } catch (_) {} }
-      wait.dispose();
+      // Abort the original connection and stop feedback, but keep this operation
+      // registered until lookup settles so route changes can still cancel it.
+      wait.pause();
+      if (wait.cancelled) return;
       formingStatus.textContent = 'Checking for your saved venture…';
       liveStatus.textContent = 'Checking for your saved venture…';
       const result = err.rejected ? { state: 'failed' } : legacy ? {
         state: 'unavailable',
         message: 'Automatic recovery was unavailable and this response is unconfirmed. Check your ventures before trying again; this request will not be resubmitted.',
       } : await reconcileManifest(requestId);
+      if (wait.cancelled) return;
       if (result.state === 'completed') { completeManifest(result.venture); return; }
       wait.finish('failed');
       if (result.state === 'failed') clearManifest(requestId);
-      const message = result.state === 'unavailable' ? result.message : result.state === 'failed' ? err.message :
+      const failureMessage = err.name === 'AbortError' ?
+        'The connection timed out before completion. Your request was checked; you can try again.' : err.message;
+      const message = result.state === 'unavailable' ? result.message : result.state === 'failed' ? failureMessage :
         'The connection ended before completion. This preview is not a confirmed result. Reconnect or submit the same sentence to check again; no second venture will be generated.';
       if (moved) {
         liveStatus.textContent = message;
@@ -660,11 +682,17 @@
       if (busy) note.textContent = 'Updating your venture. The first result stays safe until the refinement is ready.';
       else if (waiting) note.textContent = 'You can write now. Refinement will be ready when the first renders finish.';
       input.addEventListener('input', () => { refinementDraft = input.value; note.textContent = waiting ? 'Waiting for the first renders to finish…' : ''; });
-      const recover = async (error) => {
+      const recover = async (error, cancelled = () => false) => {
         refinementBusy = false;
         // The request may have completed even if its response was interrupted.
-        try { complete(await api(vpath(v, ''))); }
-        catch (_) { refinementState = null; renderRefinement(venture); }
+        try {
+          const fresh = await api(vpath(v, ''));
+          if (cancelled()) return;
+          complete(fresh);
+        } catch (_) {
+          if (cancelled()) return;
+          refinementState = null; renderRefinement(venture);
+        }
         const currentNote = refinement.querySelector('.refinement-note');
         if (currentNote && venture.refinement?.state !== 'pending') {
           currentNote.textContent = error.message + ' Your first result is still here.';
@@ -685,15 +713,17 @@
         }, 240000);
         try {
           const fresh = await api(vpath(v, '/refine'), { method: 'POST', body: JSON.stringify({ context }), signal: wait.signal });
+          if (wait.cancelled) return;
           wait.finish();
           refinementBusy = false;
           refinementDraft = '';
           complete(fresh);
           toast(unlimited ? 'Your refinement is complete.' : 'Your one refinement is complete.');
         } catch (error) {
+          if (wait.cancelled) return;
           wait.finish('failed');
           if (error.name === 'AbortError') error = new Error('The connection timed out. Checking whether your refinement finished.');
-          await recover(error);
+          await recover(error, () => wait.cancelled);
         } finally { wait.finish('interrupted'); wait.dispose(); }
       } }, label, help, input, h('div', { class: 'refinement-buttons' }, submit, skip), note);
       skip.addEventListener('click', async () => {
@@ -874,6 +904,7 @@
         const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
         while (true) {
           const { value, done } = await reader.read(); if (done) break;
+          if (wait.cancelled) return;
           buf += dec.decode(value, { stream: true });
           let idx;
           while ((idx = buf.indexOf('\n\n')) >= 0) {
@@ -886,6 +917,7 @@
         }
         if (pathStreaming) throw new Error('The stream ended early.');
       } catch (e) {
+        if (wait.cancelled) return;
         wait.finish('failed'); pathStreaming = false;
         const message = e.name === 'AbortError' ? 'The connection timed out. Refresh to check whether your path finished before retrying.' : e.message;
         toast(message); renderTierPicks(venture); renderPath(venture);
