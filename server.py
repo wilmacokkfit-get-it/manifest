@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import html
+import hashlib
 import json
 import os
 import re
 import time
 import random
+import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from app.plan_quality import require_valid_plan
+from app.store import ManifestRecoveryUnavailable
 
 ROOT = Path(__file__).resolve().parent
 
@@ -432,11 +435,58 @@ TEXT_TIMEOUT_SECONDS = 120
 class ManifestBody(BaseModel):
     idea: str = Field(min_length=8, max_length=300)
     mix_id: str | None = Field(default=None, max_length=100)
+    request_id: uuid.UUID | None = None
+
+
+@app.exception_handler(ManifestRecoveryUnavailable)
+async def manifest_recovery_unavailable(request: Request, exc: ManifestRecoveryUnavailable):
+    return JSONResponse({"error": str(exc), "code": "manifest_recovery_unavailable"}, status_code=503,
+                        headers={"Cache-Control": "private, no-store"})
+
+
+async def _manifest_record(request: Request, request_id: str) -> dict | None:
+    for owner in dict.fromkeys((_owner_token(request), request.state.owner)):
+        record = await store.get_manifest_request(owner, request_id)
+        if record:
+            return record
+    return None
+
+
+async def _manifest_recovery_view(record: dict, request: Request) -> dict:
+    result = await store.manifest_result(record)
+    venture = result.pop("venture", None)
+    if venture:
+        if not _is_creator(request, venture):
+            raise HTTPException(404, "Request not found.")
+        result["venture"] = _public_view(
+            venture, is_owner=True, unlimited=await is_app_owner(request))
+    return result
+
+
+@app.get("/api/manifest/requests/{request_id}")
+async def manifest_request(request_id: uuid.UUID, request: Request):
+    record = await _manifest_record(request, str(request_id))
+    if not record:
+        raise HTTPException(404, "Request not found.")
+    return JSONResponse(await _manifest_recovery_view(record, request),
+                        headers={"Cache-Control": "private, no-store", "Vary": "Cookie"})
 
 
 @app.post("/api/manifest")
 async def manifest(body: ManifestBody, request: Request):
     idea = " ".join(body.idea.split())
+    request_id = str(body.request_id or uuid.uuid4())
+    fingerprint = hashlib.sha256(json.dumps(
+        [idea, body.mix_id], ensure_ascii=False).encode()).hexdigest()
+    # Clients without a recovery ID retain the original generation API while
+    # the external additive migration is being installed. Identified requests
+    # always fail closed rather than silently losing their replay guarantees.
+    record = await _manifest_record(request, request_id) if body.request_id else None
+    if record:
+        if record["fingerprint"] != fingerprint:
+            raise HTTPException(409, "This request ID belongs to a different sentence.")
+        return JSONResponse(await _manifest_recovery_view(record, request),
+                            headers={"Cache-Control": "private, no-store"})
     chosen = None
     if body.mix_id:
         saved_mix = _mix_snapshot(body.mix_id, "mix", _owner_token(request))
@@ -452,7 +502,24 @@ async def manifest(body: ManifestBody, request: Request):
     if chosen:
         angle = ("Preserve this selected hybrid's exact product, buyer and borrowed mechanisms. "
                  "Do not reinterpret it as an unrelated venture. Concept: " + json.dumps(chosen, ensure_ascii=False))
-    admission = None if unlimited else await _reserve_admission(caller, global_slot=True)
+    venture_id = str(uuid.uuid4())
+    # A single durable insert fences concurrent replays, including unlimited
+    # creators. Never delete/reclaim this identity, even after lease expiry.
+    claimed = (await _shielded_bounded_call(
+        store.claim_manifest_request(owner, request_id, fingerprint, venture_id))
+        if body.request_id else True)
+    if not claimed:
+        record = await _manifest_record(request, request_id)
+        if not record or record["fingerprint"] != fingerprint:
+            raise HTTPException(409, "This request ID belongs to a different sentence.")
+        return JSONResponse(await _manifest_recovery_view(record, request),
+                            headers={"Cache-Control": "private, no-store"})
+    try:
+        admission = None if unlimited else await _reserve_admission(caller, global_slot=True)
+    except BaseException:
+        if body.request_id:
+            await _shielded_bounded_call(store.fail_manifest_request(owner, request_id))
+        raise
 
     async def gen():
         buf = ""
@@ -460,7 +527,9 @@ async def manifest(body: ManifestBody, request: Request):
         last_emit = 0.0
         last_key = None
         try:
-            yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at})
+            yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at,
+                               "request_id": request_id if body.request_id else None,
+                               "recovery_supported": bool(body.request_id)})
             # A bounded worker cannot outlive its five-minute database lease.
             with anyio.fail_after(TEXT_TIMEOUT_SECONDS):
                 avoid = [] if chosen else await store.recent_concepts(owner)
@@ -483,6 +552,7 @@ async def manifest(body: ManifestBody, request: Request):
             require_valid_plan(data, idea)
             slug = unique_slug(data["name"], store.slug_exists)
             row = {
+                "id": venture_id,
                 "slug": slug, "owner_token": owner, "idea_raw": idea, "idea_hash": prov["hash"],
                 "provenance_code": prov["code"], "created_at": created_at,
                 **{k: data[k] for k in ("name", "tagline", "description", "category", "accent", "tiers", "roadmap", "grounding", "image_prompts")},
@@ -506,6 +576,10 @@ async def manifest(body: ManifestBody, request: Request):
             # Only pending entries are released; a successful atomic commit is
             # never refunded even if the client disconnects before seeing done.
             await _release_admission(admission)
+            # This is only a terminal worker marker. Lookup always checks the
+            # saved row first, including ambiguous commits and cancellation.
+            if body.request_id:
+                await _shielded_bounded_call(store.fail_manifest_request(owner, request_id))
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

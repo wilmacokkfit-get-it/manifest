@@ -35,6 +35,10 @@ WORK_LEASE_SECONDS = 300
 RENDER_LEASE_SECONDS = 600
 
 
+class ManifestRecoveryUnavailable(RuntimeError):
+    """The external database needs the explicit additive recovery migration."""
+
+
 def lease_until(seconds: int = WORK_LEASE_SECONDS) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
@@ -85,6 +89,16 @@ def _new_id() -> str:
 
 class RenderAccess:
     """Translate stored references without changing existing records or objects."""
+
+    async def manifest_result(self, record: dict) -> dict:
+        # The venture insert is the durable completion marker. Never infer
+        # failure from a lost commit response or an expired request lease alone.
+        venture = await self.get_by_id(record["venture_id"])
+        if venture and venture["owner_token"] == record["owner_token"]:
+            return {"state": "completed", "venture": venture}
+        state = "failed" if record["failed"] else (
+            "unconfirmed" if lease_expired(record, "lease_until", None) else "pending")
+        return {"state": state}
 
     async def reconcile_venture(self, venture: dict) -> dict:
         """Lazily reclaim abandoned text work, never a successful refinement.
@@ -247,6 +261,15 @@ class SQLiteStore(RenderAccess):
                 );
                 CREATE INDEX IF NOT EXISTS idx_admissions_caller
                   ON generation_admissions(caller, admitted_at);
+                CREATE TABLE IF NOT EXISTS manifest_requests (
+                  owner_token TEXT NOT NULL,
+                  request_id TEXT NOT NULL,
+                  fingerprint TEXT NOT NULL,
+                  venture_id TEXT NOT NULL UNIQUE,
+                  lease_until TEXT NOT NULL,
+                  failed INTEGER NOT NULL DEFAULT 0,
+                  PRIMARY KEY(owner_token, request_id)
+                );
                 """
             )
             cols = {r[1] for r in self._db.execute("PRAGMA table_info(ventures)").fetchall()}
@@ -334,6 +357,30 @@ class SQLiteStore(RenderAccess):
             self._db.commit()
             if cursor.rowcount != 1:
                 raise RuntimeError("Refinement admission expired.")
+
+    async def get_manifest_request(self, owner: str, request_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM manifest_requests WHERE owner_token = ? AND request_id = ?",
+                (owner, request_id)).fetchone()
+        return dict(row) if row else None
+
+    async def claim_manifest_request(self, owner: str, request_id: str, fingerprint: str,
+                                     venture_id: str) -> bool:
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO manifest_requests(owner_token, request_id, fingerprint, venture_id, lease_until) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_token, request_id) DO NOTHING",
+                (owner, request_id, fingerprint, venture_id, lease_until()))
+            self._db.commit()
+            return cursor.rowcount == 1
+
+    async def fail_manifest_request(self, owner: str, request_id: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE manifest_requests SET failed = 1 WHERE owner_token = ? AND request_id = ?",
+                (owner, request_id))
+            self._db.commit()
 
     async def create_reserved_venture(self, token: str, row: dict) -> dict:
         row = dict(row)
@@ -881,10 +928,38 @@ class SupabaseStore(RenderAccess):
             headers["Prefer"] = prefer
         r = await self._client.request(method, f"/rest/v1/{table}", params=params, json=json_body, headers=headers)
         if r.status_code >= 400:
+            if table == "manifest_requests":
+                try:
+                    code = r.json().get("code")
+                except (ValueError, AttributeError):
+                    code = None
+                if code in ("PGRST205", "42P01", "42501"):
+                    raise ManifestRecoveryUnavailable(
+                        "Generation recovery setup is incomplete. Apply supabase/manifest-recovery.sql "
+                        "to the configured Supabase project before generating ventures.")
             raise RuntimeError(f"Supabase {method} {table} failed: {r.status_code} {r.text[:300]}")
         if r.status_code == 204 or not r.text:
             return None
         return r.json()
+
+    async def get_manifest_request(self, owner: str, request_id: str) -> dict | None:
+        data = await self._rest("GET", "manifest_requests", params={
+            "owner_token": f"eq.{owner}", "request_id": f"eq.{request_id}", "limit": "1"})
+        return data[0] if data else None
+
+    async def claim_manifest_request(self, owner: str, request_id: str, fingerprint: str,
+                                     venture_id: str) -> bool:
+        data = await self._rest("POST", "manifest_requests", params={
+            "on_conflict": "owner_token,request_id"},
+            json_body={"owner_token": owner, "request_id": request_id, "fingerprint": fingerprint,
+                       "venture_id": venture_id, "lease_until": lease_until()},
+            prefer="resolution=ignore-duplicates,return=representation")
+        return bool(data)
+
+    async def fail_manifest_request(self, owner: str, request_id: str) -> None:
+        await self._rest("PATCH", "manifest_requests", params={
+            "owner_token": f"eq.{owner}", "request_id": f"eq.{request_id}"},
+            json_body={"failed": True})
 
     async def reserve_generation(self, token: str, caller: str, hour_cap: int,
                                  day_cap: int, global_cap: int | None) -> str | None:

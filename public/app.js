@@ -201,10 +201,112 @@
   addEventListener('scroll', checkReveals, { passive: true });
   addEventListener('resize', checkReveals);
 
+  // ---------- durable manifest recovery ----------
+  const MANIFEST_REQUEST_KEY = 'manifest.pending-request.v1';
+  let memoryRequest = null;
+  function pendingManifest() {
+    try {
+      const value = JSON.parse(localStorage.getItem(MANIFEST_REQUEST_KEY));
+      if (value && typeof value.request_id === 'string' && typeof value.idea === 'string') return value;
+    } catch (_) {}
+    return memoryRequest;
+  }
+  function rememberManifest(value) {
+    memoryRequest = value;
+    try {
+      if (value) localStorage.setItem(MANIFEST_REQUEST_KEY, JSON.stringify(value));
+      else localStorage.removeItem(MANIFEST_REQUEST_KEY);
+    } catch (_) {} // Recovery still works in this tab when storage is disabled.
+  }
+  function clearManifest(requestId) {
+    if (pendingManifest()?.request_id === requestId) rememberManifest(null);
+  }
+  async function reconcileManifest(requestId, attempts = 15) {
+    let result = { state: 'unconfirmed' };
+    for (let i = 0; i < attempts; i++) {
+      try {
+        // Independent deadline: the original generation signal may be aborted.
+        const response = await fetch(API + `/api/manifest/requests/${encodeURIComponent(requestId)}`, {
+          credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(8000),
+        });
+        if (response.ok) {
+          result = await response.json();
+          if (result.state === 'completed' && result.venture) return result;
+          if (result.state === 'failed' || result.state === 'unconfirmed') return result;
+        } else if (response.status === 503) {
+          const error = await response.json();
+          if (error.code === 'manifest_recovery_unavailable') return { state: 'unavailable', message: error.error };
+        }
+      } catch (_) {} // Offline/404 is not evidence that the save failed.
+      if (i + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    return result;
+  }
+  function showRecoveredManifest(venture, requestId) {
+    clearManifest(requestId);
+    orbWrap.classList.remove('forming');
+    formingStatus.textContent = '';
+    heroTag.style.opacity = '';
+    const view = VentureView({ live: { meta: null, data: venture, streaming: null, idea: venture.idea_raw } });
+    mount(view, null);
+    view.complete(venture);
+    history.replaceState({}, '', href(`/v/${venture.slug}`));
+    toast('Your saved venture was recovered.');
+  }
+  async function resumeManifestRecovery() {
+    const pending = pendingManifest();
+    if (!pending || manifestBusy) return;
+    if (!ideaInput.value.trim()) {
+      ideaInput.value = pending.idea;
+      pendingMixId = pending.mix_id || null;
+      pendingMixSentence = pending.idea;
+      ideaInput.dispatchEvent(new Event('input'));
+    }
+    if (pending.legacy) {
+      heroError.textContent = 'Automatic recovery was unavailable for this request. Check your ventures before trying again; this request will not be resubmitted.';
+      return;
+    }
+    manifestBusy = true;
+    try {
+      const result = await reconcileManifest(pending.request_id);
+      if (result.state === 'completed') showRecoveredManifest(result.venture, pending.request_id);
+      else if (result.state === 'failed') {
+        clearManifest(pending.request_id);
+        heroError.textContent = 'The interrupted request did not save a venture. You can try again.';
+      } else if (result.state === 'unavailable') {
+        heroError.textContent = result.message;
+      } else {
+        heroError.textContent = 'This request is still unconfirmed. Reconnect or submit the same sentence to check it again.';
+      }
+    } finally { manifestBusy = false; }
+  }
+  addEventListener('online', resumeManifestRecovery);
+
   // ---------- the reveal ----------
   async function startManifest(idea, mixId = null) {
     if (manifestBusy) return;
     manifestBusy = true;
+    let pending = pendingManifest();
+    if (pending?.legacy) {
+      heroError.textContent = 'This earlier request is unconfirmed and cannot be automatically recovered. Check your ventures before trying again; no second request has been sent.';
+      manifestBusy = false;
+      return;
+    }
+    if (pending && (pending.idea !== idea || (pending.mix_id || null) !== mixId)) {
+      try {
+        const result = await reconcileManifest(pending.request_id);
+        if (result.state === 'completed') { showRecoveredManifest(result.venture, pending.request_id); return; }
+        if (result.state !== 'failed') {
+          heroError.textContent = 'Your previous request is still unconfirmed. Check it before starting a different venture.';
+          return;
+        }
+        clearManifest(pending.request_id);
+        pending = null;
+      } finally { manifestBusy = false; }
+      manifestBusy = true;
+    }
+    const requestId = pending?.request_id || crypto.randomUUID();
+    rememberManifest({ request_id: requestId, idea, mix_id: mixId });
     orbWrap.classList.add('forming');
     heroTag.style.opacity = '0';
     formingName.textContent = '';
@@ -217,21 +319,61 @@
     let view = null;           // VentureView once we move to it
     let moved = false;
     let meta = null;
+    let reader = null;
+    let legacy = false;
+    function completeManifest(data) {
+      clearManifest(requestId);
+      wait.finish(); liveStatus.remove();
+      if (pendingMixSentence === idea) { pendingMixId = null; pendingMixSentence = null; }
+      if (!moved) { view = VentureView({ live: { meta, data, streaming: null, idea } }); mount(view, null); }
+      view.complete(data);
+      history.replaceState({}, '', href(`/v/${data.slug}`));
+    }
 
     try {
-      const res = await fetch(API + '/api/manifest', {
+      let res = await fetch(API + '/api/manifest', {
         method: 'POST',
         credentials: 'same-origin',
         signal: wait.signal,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea, ...(mixId ? { mix_id: mixId } : {}) }),
+        body: JSON.stringify({ idea, request_id: requestId, ...(mixId ? { mix_id: mixId } : {}) }),
       });
+      // This is an explicit compatibility path, not a retry after generation:
+      // setup 503 is returned before any quota reservation/provider call. Only
+      // a brand-new request can downgrade; an existing unknown request cannot.
+      if (!pending && res.status === 503) {
+        const setup = await res.clone().json().catch(() => ({}));
+        if (setup.code === 'manifest_recovery_unavailable') {
+          legacy = true;
+          rememberManifest({ request_id: requestId, idea, mix_id: mixId, legacy: true });
+          liveStatus.textContent = 'Automatic recovery is unavailable. Keep this page open while your venture generates.';
+          heroError.textContent = liveStatus.textContent;
+          toast(liveStatus.textContent);
+          res = await fetch(API + '/api/manifest', {
+            method: 'POST', credentials: 'same-origin', signal: wait.signal,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idea, ...(mixId ? { mix_id: mixId } : {}) }),
+          });
+        }
+      }
       if (!res.ok || !res.body) {
         let msg = 'The engine is unavailable right now.';
         try { msg = (await res.json()).error || msg; } catch (_) {}
-        throw new Error(msg);
+        const error = new Error(msg);
+        // Validation happens before the request identity is claimed.
+        if (res.status === 422 || (legacy && res.status === 429)) {
+          clearManifest(requestId); error.rejected = true;
+        }
+        throw error;
       }
-      const reader = res.body.getReader();
+      if (res.headers.get('content-type')?.includes('application/json')) {
+        const replay = await res.json();
+        if (replay.state === 'completed') { completeManifest(replay.venture); return; }
+        throw new Error(replay.state === 'failed' ?
+          'The interrupted request did not save a venture. Submit again to start a new request.' :
+          'The original request is still running. Checking for its saved result…');
+      }
+      reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
       let done = false;
@@ -260,11 +402,7 @@
               }
             } else view.update(data, streaming);
           } else if (ev.event === 'done') {
-            done = true; wait.finish(); liveStatus.remove();
-            if (pendingMixSentence === idea) { pendingMixId = null; pendingMixSentence = null; }
-            if (!moved) { view = VentureView({ live: { meta, data: ev.data, streaming: null, idea } }); mount(view, null); }
-            view.complete(ev.data);
-            history.replaceState({}, '', href(`/v/${ev.data.slug}`));
+            done = true; completeManifest(ev.data);
           } else if (ev.event === 'error') {
             throw new Error(ev.data.message || 'The engine stalled.');
           }
@@ -273,8 +411,20 @@
       if (!done) throw new Error('The connection ended before completion. This preview is not a confirmed result. Check your ventures before trying again.');
       await reader.cancel();
     } catch (err) {
+      // Stop the old stream before lookup, but never POST another generation.
+      if (reader) { try { await reader.cancel(); } catch (_) {} }
+      wait.dispose();
+      formingStatus.textContent = 'Checking for your saved venture…';
+      liveStatus.textContent = 'Checking for your saved venture…';
+      const result = err.rejected ? { state: 'failed' } : legacy ? {
+        state: 'unavailable',
+        message: 'Automatic recovery was unavailable and this response is unconfirmed. Check your ventures before trying again; this request will not be resubmitted.',
+      } : await reconcileManifest(requestId);
+      if (result.state === 'completed') { completeManifest(result.venture); return; }
       wait.finish('failed');
-      const message = err.name === 'AbortError' ? 'The connection timed out. Check your ventures before trying again.' : err.message;
+      if (result.state === 'failed') clearManifest(requestId);
+      const message = result.state === 'unavailable' ? result.message : result.state === 'failed' ? err.message :
+        'The connection ended before completion. This preview is not a confirmed result. Reconnect or submit the same sentence to check again; no second venture will be generated.';
       if (moved) {
         liveStatus.textContent = message;
         view.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
@@ -1407,5 +1557,6 @@
 
   // ---------- start ----------
   render();
+  resumeManifestRecovery();
   setTimeout(checkReveals, 50);
 })();
