@@ -56,6 +56,8 @@ CREATION STANDARD:
 - Keep the product, tiers, roadmap, revenue arithmetic and both renders internally consistent. Costs are rough estimates, not vendor quotations. Name tools and suppliers only when confident they exist; otherwise name the supplier type and a useful search phrase.
 - Distinguish a plausible hypothesis from verified evidence. This generation has not performed live market research: do not invent studies, citations, current launch dates, adoption figures or customer traction. Never guarantee novelty, patentability, exclusivity, success or legal ownership.
 - Check physical, operational and regulatory feasibility. For electrical, structural, food-contact, medical or other safety-critical work, name qualified review and start with a nonfunctional mockup or customer test; never prescribe hazardous DIY testing. Put qualified review BEFORE functional construction or testing in the roadmap, not only at the end. Never claim legal compliance or safety certification without verified evidence. Renders illustrate the actual concept, not impossible technology.
+- Approval of one component does not certify the assembled product. Do not call a proposed product UL-listed, CE-marked, compliant or certified. Say that a qualified professional or accredited lab must determine the applicable requirements. Gate functional work in the lean tier as well as the roadmap on prior qualified review.
+- Refundable deposits and reservations show preliminary interest, not earned revenue or proven paid demand. In first_hundred use fulfilled purchases or completed services times an estimated test price; explicitly label prices, benefits and pass/fail thresholds as hypotheses or proposals.
 - Be concise and useful. Embed these judgments in the existing fields; do not add scores, extra keys, a reasoning transcript or marketing filler.
 
 VARIETY IS MANDATORY. Broad or vague sentences (an industry name, a category, "an app for X", "a money making app") have a hundred possible ventures inside them. Never take the first obvious interpretation. Pick one specific wedge: a specific customer, a specific painful moment in their day, a specific thing they already pay for badly. Where everyone expects software, consider a physical product, a service, a kit, a subscription box, a marketplace, a tool for pros, a franchise, a media brand. For broad ideas, vary customer, form and name across generations. For explicit product ideas, preserve the requested product and vary only unconstrained details. You will be given an ANGLE to build from and a list of names and concepts to AVOID. Use the angle where compatible with the creator's explicit intent, and avoid duplicating prior names or lightly rewording their concepts."""
@@ -298,21 +300,21 @@ MOCK_VENTURE = {
     "category": "Jobsite tools",
     "accent": "#e0a458",
     "tiers": [
-        {"label": "The Lean Build", "title": "Bent and welded", "description": "One hook, hand-bent from 3/8 inch rod and powder coated in a friend's shop. Twenty units for about four hundred dollars in material, sold at the paint counter."},
+        {"label": "The Lean Build", "title": "Paper fit study", "description": "Interview painters with a nonfunctional cardboard hook; estimate $20 for mockups. A qualified structural engineer must review load and ladder compatibility before functional construction."},
         {"label": "The Real Product", "title": "Cast, coated, carded", "description": "An investment-cast hook with a rubber rung pad and a locking gate, blister packed for retail. Tooling and a first run of two thousand comes in around eighteen thousand dollars."},
         {"label": "The Empire", "title": "The rung system", "description": "A family of clip-on rung accessories: tray, cordless charger dock, paint cup, light. Licensed to a ladder manufacturer so it ships in the box."},
     ],
     "roadmap": [
-        {"step": 1, "action": "Weld ten prototypes and give them to painters.", "where": "Any local fab shop or a friend with a MIG welder; hand them out at a Sherwin-Williams counter on a Monday morning."},
-        {"step": 2, "action": "Film the bucket-drop test and post it.", "where": "A thirty second clip on TikTok and Facebook contractor groups showing the hook holding sixty pounds while the ladder shakes."},
-        {"step": 3, "action": "Take two hundred preorders at thirty-four dollars.", "where": "A Shopify store with a single product page and the video above the fold."},
+        {"step": 1, "action": "Interview painters using a cardboard mockup.", "where": "Proposed gate: three of five painters identify a useful improvement over their current hook. Revise the fit if fewer do."},
+        {"step": 2, "action": "Commission qualified structural review.", "where": "A qualified structural engineer must assess ladder compatibility and define safe loads and testing before functional construction."},
+        {"step": 3, "action": "Commission professional prototypes under the reviewed test plan.", "where": "A fabrication shop follows the engineer's design and supervised testing requirements; no unreviewed ladder trials."},
         {"step": 4, "action": "Get a quote for a cast version.", "where": "Three investment casting shops through Xometry or Thomasnet; ask for a 2,000 unit run with rubber overmold."},
         {"step": 5, "action": "Pitch a distributor once you clear a thousand units.", "where": "Regional paint-supply distributors and the buyer at a hardware co-op like Do it Best or Ace."},
     ],
     "grounding": {
-        "exists": "Werner sells a plastic ladder bucket hook and there are dozens of cheap S-hooks on Amazon, but none lock to the rung or carry tools and a bucket together.",
-        "who_pays": "Residential painters and gutter crews, about thirty-four dollars each, with foremen buying four to six per crew.",
-        "first_hundred": "Three hooks sold in person at a paint counter to the first crew that watches the drop test, paid on the spot with a card reader.",
+        "exists": "Ordinary bucket hooks already exist. The locking tool carrier is a hypothesis for fewer retrieval trips, not verified novelty; extra weight may defeat the benefit.",
+        "who_pays": "Residential painters and gutter crews; propose testing thirty-four dollars each rather than claiming proven demand.",
+        "first_hundred": "After qualified review and supervised testing, sell and deliver three hooks at an estimated $34 each through a paint counter: $102 revenue, not profit. Refundable reservations are not earned revenue.",
     },
     "image_prompts": [
         "Photorealistic product render of a forged steel ladder hook with a warm amber powder coat, clamped to an aluminum ladder rung, alone on a near-black studio backdrop, soft rim lighting, shallow depth of field, no text.",
@@ -414,6 +416,8 @@ demand. Separate revenue from profit and include ongoing costs where relevant.
 Do not treat earlier generated assumptions as verified facts. For safety-critical
 products require qualified review before functional tests; the first move can
 be a nonfunctional mockup or buyer interview, never hazardous DIY work.
+Component approvals do not certify the final product. Never assert unsupported
+certification or compliance. Refundable deposits are not earned revenue.
 
 Produce the keys IN THIS EXACT ORDER:
 
@@ -465,15 +469,15 @@ async def stream_path_text(venture: dict, tier_index: int) -> AsyncIterator[str]
 
 
 MOCK_PATH = {
-    "first_move": "Bend one hook tonight from a piece of 3/8 inch rod and hang a full bucket on it.",
+    "first_move": "Sketch a nonfunctional paper hook and ask a painter about their current bucket carrier.",
     "steps": [
-        {"title": "Make ten by hand", "why": "You need something real in painters' hands before you spend a dollar on tooling.",
-         "how": ["Buy 3/8 inch mild steel rod at a farm store or Menards.", "Bend around a 2 inch pipe in a vise; weld the gate tab.", "Rattle-can or ask a local powder coater for a batch price."],
-         "suppliers": [{"kind": "Local weld or fab shop", "examples": [], "search": "welding shop near me"}],
-         "cost": "$60-150", "time": "One weekend", "done_when": "Ten hooks, each holding 60 lb for a full minute."},
-        {"title": "Put them on ladders", "why": "Feedback from the first ten users decides the shape of everything after.",
-         "how": ["Stand at a paint counter Monday 6:30am and hand hooks to crews.", "Ask one question: what would make you pay $30 for this?", "Write every answer in your phone."],
-         "suppliers": [], "cost": "Free", "time": "One morning", "done_when": "Ten crews have a hook and you have ten answers."},
+        {"title": "Interview five painters", "why": "Test whether the fit solves a real inconvenience before spending on tooling.",
+         "how": ["Sketch a paper mockup.", "Ask five painters about their current hook.", "Revise the fit if fewer than three identify a useful improvement; this is a proposed threshold."],
+         "suppliers": [], "cost": "Estimated $0-20", "time": "One morning", "done_when": "Three of five painters identify a useful improvement in the paper mockup."},
+        {"title": "Commission qualified structural review", "why": "A ladder accessory can create a fall or load hazard.",
+         "how": ["Contact a qualified structural engineer.", "Request review of compatibility and load assumptions.", "Have the engineer define professional fabrication and supervised tests before any functional construction."],
+         "suppliers": [{"kind": "Structural engineer", "examples": [], "search": "qualified product structural engineer"}],
+         "cost": "Rough estimate $500-2000", "time": "One to three weeks", "done_when": "The engineer has documented the design review and supervised test requirements."},
     ],
     "watch_out": "Ordering tooling before a stranger has paid you money.",
 }

@@ -21,6 +21,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from app.plan_quality import require_valid_plan
 
 ROOT = Path(__file__).resolve().parent
 
@@ -474,10 +475,12 @@ async def manifest(body: ManifestBody, request: Request):
                         last_emit, last_key = now, key
                         yield _sse("partial", {"data": obj, "streaming": key})
             text_completed = True
-            obj, _ = parse_partial(buf)
-            if not obj or not obj.get("name"):
+            obj = json.loads(buf)
+            if not isinstance(obj, dict) or not obj.get("name"):
                 raise RuntimeError("The engine returned nothing usable.")
+            require_valid_plan(obj, idea)
             data = _normalize(obj)
+            require_valid_plan(data, idea)
             slug = unique_slug(data["name"], store.slug_exists)
             row = {
                 "slug": slug, "owner_token": owner, "idea_raw": idea, "idea_hash": prov["hash"],
@@ -709,7 +712,9 @@ async def refine_venture(slug: str, body: RefinementBody, request: Request):
                 buf += chunk
         text_completed = True
         obj = _complete_refinement(buf)
+        require_valid_plan(obj, str(v.get("idea_raw") or "") + " " + context)
         data = _normalize(obj)
+        require_valid_plan(data, str(v.get("idea_raw") or "") + " " + context)
         marker = {"state": "completed", "context": context, "claim_id": claim_id}
         grounding = dict(data["grounding"])
         grounding["_refinement"] = marker
@@ -852,10 +857,12 @@ async def choose_path(slug: str, body: PathBody, request: Request):
                     last_emit, last_key = now, key
                     yield _sse("partial", {"data": obj, "streaming": key})
             text_completed = True
-            obj, _ = parse_partial(buf)
-            if not obj or not obj.get("steps"):
+            obj = json.loads(buf)
+            if not isinstance(obj, dict) or not obj.get("steps"):
                 raise RuntimeError("The engine returned nothing usable.")
+            require_valid_plan(obj, str(v.get("idea_raw") or "") + " " + str(v.get("description") or ""), path=True)
             path = _normalize_path(obj, tier, tier_label)
+            require_valid_plan(path, str(v.get("idea_raw") or "") + " " + str(v.get("description") or ""), path=True)
             saved = await store.finish_path(v["id"], path, claim_id)
             if not saved:
                 raise RuntimeError("The path claim could not be completed.")

@@ -36,7 +36,7 @@
   function conceptDisclosure() {
     return h('aside', { class: 'concept-disclosure', 'aria-label': 'Important concept limitations' },
       h('strong', { text: 'AI-generated concept · Not a tested product' }),
-      h('p', { text: 'Proposed advantages are hypotheses, not proof of performance, safety or originality. Prices and plans are estimates; renders are illustrations. Verify claims, rights and safety with qualified professionals before building, selling or investing.' }),
+      h('p', { text: 'Streaming drafts are unchecked; do not act on them. Proposed advantages are hypotheses, not proof of performance, safety or originality. Prices and plans are estimates; renders are illustrations. Verify claims, rights and safety with qualified professionals before building, selling or investing.' }),
       h('a', { href: href('/about'), 'data-route': '/about', text: 'Read important limitations' }));
   }
 
@@ -700,7 +700,8 @@
       renderTierPicks(v);
       path.replaceChildren(
         h('div', { class: 'path-head' }, h('div', { class: 'v-label', text: 'Your path' }), h('h2', { class: 'path-title caret', text: TIER_NAMES[tier] }),
-          h('p', { class: 'path-sub', text: 'The engine is writing your step-by-step guide. Steps appear as they land.' })),
+          h('p', { class: 'path-sub', text: 'The engine is writing your step-by-step guide. Steps appear as they land.' }),
+          h('p', { class: 'ground-note', text: 'Unchecked draft while streaming. Do not begin construction or testing; qualified safety review is still required.' })),
         h('div', { class: 'psteps' }));
       show(path); roadmap.classList.add('hidden');
       path.scrollIntoView({ behavior: 'smooth', block: 'start' });

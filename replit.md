@@ -14,6 +14,11 @@ The configured hook `scripts/post-merge.sh` installs `requirements.txt` into the
 
 ## AI configuration
 
+Generated plans are checked before saving for recognizable unsupported approval
+claims, refundable-deposit revenue and unsafe review order. These conservative
+checks do not certify safety. See `docs/plan-quality.md` for the provider-free
+four-case evaluation, human rubric and explicitly bounded opt-in live runner.
+
 Real text and image generation require `OPENAI_API_KEY` in Replit Secrets. The shared settings use `LLM_PROVIDER=openai`, `LLM_MODEL=gpt-5-mini`, `IMAGE_PROVIDER=openai`, and `IMAGE_MODEL=gpt-image-1`. Generation uses the connected OpenAI account's credits. Never put keys in source files or chat.
 
 The OpenAI key has been supplied securely. Real streaming venture generation, private-owner access, SQLite saving, and both product image renders were verified. Explicitly selecting OpenAI avoids the imported app's automatic canned mock response if credentials are removed later.
