@@ -169,6 +169,8 @@ def compute_facts(ventures: list[dict], needs: list[dict]) -> dict[str, Any]:
 
 def facts_hash(facts: dict) -> str:
     slim = {k: v for k, v in facts.items() if not k.startswith("_")}
+    # Unchanged Floor data must not make an older generation standard "fresh".
+    slim["_generation_contract"] = ARCHITECT_SYSTEM
     return hashlib.sha256(json.dumps(slim, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
@@ -195,10 +197,10 @@ Then write 2 or 3 CROSSBREEDS: take two real ventures from FACTS and splice them
 - "name": 1-3 plain words for the hybrid. No puns.
 - "stole": the exact thing taken from the donor, one sentence.
 - "hybrid": 2 sentences: what the host becomes with the stolen part inside it.
-- "why_it_does": one or two sentences: the non-obvious reason this works even though it should not.
+- "why_it_does": 2-4 concise sentences: compare the normal way with the borrowed mechanism and explain why the hybrid could be better or equal. Label an untested benefit a hypothesis, name the key assumption and a meaningful tradeoff, and propose a cheap side-by-side test with the original approach.
 - "sentence": ONE sentence under 25 words a person could type into MANIFEST to manifest this hybrid as its own venture.
 
-Rules: Only use ventures, asks, counts, and signals present in FACTS. If a pattern in FACTS is weak, skip it; fewer honest readings beat more padded ones. Never flatter. Never say "exciting", "synergy", "ecosystem", "leverage", "unlock". Write like a foreman reading a jobsite, not a consultant. Return ONE JSON object: {"readings": [...], "crossbreeds": [...]} and nothing else."""
+Rules: Only use ventures, asks, counts, and signals present in FACTS as evidence. New mechanisms and combinations may be creative hypotheses: do not suppress a plausible twist just because it is untested. Keep observed patterns distinct from proposed benefits; interest is not sales, and never invent measured gains. Equal performance can justify a hybrid if cost, repairability, accessibility or another constraint improves. Require a credible causal explanation; never invent a rationale for impossible physics. Safety-critical prototypes require qualified review before functional testing. If a pattern in FACTS is weak, skip it; fewer honest readings beat more padded ones. Never flatter. Never say "exciting", "synergy", "ecosystem", "leverage", "unlock". Write like a foreman reading a jobsite, not a consultant. Return ONE JSON object: {"readings": [...], "crossbreeds": [...]} and nothing else."""
 
 
 async def write_readings(facts: dict) -> tuple[list[dict], list[dict]]:
@@ -255,7 +257,7 @@ async def write_readings(facts: dict) -> tuple[list[dict], list[dict]]:
         if not c.get("name") or not c.get("hybrid") or not c.get("sentence"):
             continue
         crosses.append({"host_slug": c["host_slug"], "donor_slug": c["donor_slug"],
-                        **{k: str(c.get(k) or "")[:lim] for k, lim in (("name", 60), ("stole", 240), ("hybrid", 600), ("why_it_does", 500), ("sentence", 220))}})
+                        **{k: str(c.get(k) or "")[:lim] for k, lim in (("name", 60), ("stole", 240), ("hybrid", 600), ("why_it_does", 1000), ("sentence", 220))}})
     return out, crosses
 
 
@@ -283,9 +285,10 @@ CROSSBREED_SYSTEM = """You are the Architect inside MANIFEST, in crossbreeding m
 Rules for a good splice:
 - Steal something SPECIFIC from the donor: a mechanism (how it physically works), a model (how money moves), a ritual (how people use it), a constraint (what it refuses to do), or a material. Name what you stole.
 - The hybrid must still solve the host's original problem for the host's original buyer. If it drifts into a different product entirely, it is not a splice, it is a new idea.
-- Say honestly why it should not work, then why it does anyway. If you cannot find a real "why it works", do not force it; pick a different thing to steal.
+- Say honestly why it might not work, then give a mechanism-based case for why it could work better than OR equal to the normal way. Identify that baseline, the causal link, the key assumption and a meaningful tradeoff. Equal performance can be worthwhile with lower cost, easier repair, accessibility or another constraint solved.
+- Keep the unexpected twist. An untested combination is allowed: label its proposed benefit a hypothesis rather than presenting it as an established fact or flattening it into a normal product. If you cannot find a credible causal case, pick a different thing to steal; do not rationalize impossible physics or fabricate measured gains.
 - No puns in names. Plain words. Forbidden: revolutionary, seamless, game-changing, disrupt, synergy, ecosystem, unlock, elevate, reimagine.
-- Make it buildable by one person in a garage first.
+- Make the first experiment cheap and accessible. For safety-critical products, begin with a nonfunctional mockup or customer test and require qualified review before functional construction or testing, not hazardous garage experiments.
 
 Return ONE JSON object, nothing else:
 {"splices": [ exactly 3 of:
@@ -293,8 +296,8 @@ Return ONE JSON object, nothing else:
    "stole": "the exact thing taken from the donor, one short sentence",
    "hybrid": "2-3 sentences: what the product becomes, concretely, and how the stolen part works inside it",
    "why_not": "one sentence: the obvious reason this should not work",
-   "why_it_does": "one or two sentences: the non-obvious reason it does",
-   "first_test": "one sentence: the cheapest real-world test, with a number (hours, dollars, people)",
+   "why_it_does": "2-4 concise sentences: normal way, causal case for better or equal performance, hypothesis label if unproven, key assumption and tradeoff",
+   "first_test": "1-2 sentences: cheapest safe side-by-side test against the normal way on the same task, proposed measurable pass/fail threshold and what to revise if it fails",
    "sentence": "ONE sentence, under 25 words, a person could type into MANIFEST to manifest this hybrid as its own venture"}
 ]}"""
 
@@ -346,5 +349,5 @@ async def write_crossbreed(host: dict, donor_venture: dict | None, lateral_field
         if not isinstance(sp, dict) or not sp.get("name") or not sp.get("hybrid"):
             continue
         out.append({k: str(sp.get(k) or "")[:lim] for k, lim in
-                    (("name", 60), ("stole", 260), ("hybrid", 900), ("why_not", 360), ("why_it_does", 600), ("first_test", 360), ("sentence", 220))})
+                    (("name", 60), ("stole", 260), ("hybrid", 900), ("why_not", 360), ("why_it_does", 1000), ("first_test", 500), ("sentence", 220))})
     return out

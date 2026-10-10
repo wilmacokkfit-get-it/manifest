@@ -528,6 +528,18 @@ footer a{color:var(--fg-50)}
 }
 
 /* ---------- MANIFEST atmosphere + shared interface polish ---------- */
+.concept-disclosure{
+  margin:24px 0;padding:16px 18px;border:1px solid rgba(197,216,212,.25);
+  border-radius:12px;background:rgba(197,216,212,.045);color:var(--fg-70);
+  font:400 13px/1.7 var(--sans);text-align:left;overflow-wrap:anywhere;
+}
+.concept-disclosure strong{display:block;color:var(--fg);font-size:13px;font-weight:500}
+.concept-disclosure p{margin:7px 0}
+.concept-disclosure a{color:var(--fg);text-decoration:underline;text-underline-offset:3px}
+.landing-disclosure{max-width:440px;margin:-16px 0 30px;text-align:center}
+.v-head .concept-disclosure{max-width:720px;margin:28px auto 0}
+.limitations{margin-top:64px;padding-top:32px;border-top:1px solid var(--line)}
+.limitations .lead{margin-top:20px}
 html{scroll-padding-top:88px}
 body{
   background:

@@ -99,6 +99,7 @@ def concepts() -> list[dict]:
             "hybrid": "A physical kit combines these mechanisms for a specific recurring job.",
             "buyer": "Independent repair technicians handling small jobs.",
             "why_now": "The supplied evidence shows related products; local demand remains uncertain.",
+            "why_it_does": "Hypothesis: compared with replacing a whole kit, a refill mechanism could keep repairs equally effective with less waste if refills stay available; dependence on a supplier is the tradeoff.",
             "first_test": "Offer ten kits to technicians and record paid reservations.",
             "closest_existing": "A basic repair kit, with the comparison unverified.",
             "sentence": "A refillable repair kit helps independent technicians finish small jobs faster.",
@@ -109,6 +110,7 @@ def concepts() -> list[dict]:
             "hybrid": "A distinct physical product for a different use.",
             "buyer": "A specific buyer with a specific problem.",
             "why_now": "Evidence is supplied but demand remains uncertain.",
+            "why_it_does": "Hypothesis: a passive clamp could hold as well as screws without wall damage if the surface is suitable, but it supports less weight.",
             "first_test": "Measure interest from ten potential buyers.",
             "closest_existing": "An existing alternative, comparison unverified.",
             "sentence": "A second concrete product serves a distinct buyer and need.",
@@ -119,6 +121,7 @@ def concepts() -> list[dict]:
             "hybrid": "A different precise service with a testable use.",
             "buyer": "A third exact buyer.",
             "why_now": "The supplied evidence motivates an experiment, not a demand claim.",
+            "why_it_does": "Hypothesis: pooling deliveries could match individual delivery reliability at lower cost if routes overlap, but scheduled windows reduce flexibility.",
             "first_test": "Run a small paid pilot with ten buyers.",
             "closest_existing": "An existing alternative, comparison unverified.",
             "sentence": "A distinct service solves a defined problem for a named buyer.",
@@ -224,11 +227,36 @@ class MixerUnitTests(unittest.IsolatedAsyncioTestCase):
         invalid_cases.append([{**valid[0], "sentence": "tiny"}, valid[1], valid[2]])
         invalid_cases.append([{**valid[0], "sentence": "s" * 301}, valid[1], valid[2]])
         invalid_cases.append([{**valid[0], "name": "n" * 81}, valid[1], valid[2]])
+        invalid_cases.append([{k: v for k, v in valid[0].items() if k != "why_it_does"}, valid[1], valid[2]])
+        invalid_cases.append([{**valid[0], "why_it_does": ""}, valid[1], valid[2]])
+        invalid_cases.append([{**valid[0], "why_it_does": "x" * 1001}, valid[1], valid[2]])
         invalid_cases.extend((valid[:2], valid + [valid[0]]))
 
         for malformed in invalid_cases:
             with self.subTest(malformed=malformed), self.assertRaises(ValueError):
                 mixer.clean_concepts({"concepts": malformed})
+
+    async def test_combine_requests_and_returns_comparative_hypotheses(self) -> None:
+        response = type("Response", (), {
+            "status": "completed", "output_text": json.dumps({"concepts": concepts()})
+        })()
+        create = AsyncMock(return_value=response)
+        client = type("Client", (), {
+            "responses": type("Responses", (), {"create": create})()
+        })()
+        with patch("openai.AsyncOpenAI", return_value=client):
+            result = await mixer.combine([trend("trend-1"), trend("trend-2")], [])
+        self.assertEqual(result, concepts())
+        instructions = create.await_args.kwargs["instructions"]
+        for phrase in (
+            "do not reject a plausible combination",
+            "better than OR equal to the normal way",
+            "explicitly label an untested benefit",
+            "same task and conditions",
+            "tradeoff or failure",
+        ):
+            self.assertIn(phrase, instructions)
+        self.assertTrue(all(c["why_it_does"].startswith("Hypothesis:") for c in result))
 
     async def test_venture_stream_prompt_selection_for_both_provider_paths(self) -> None:
         selected_angle = "Preserve this selected physical repair kit."

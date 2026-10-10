@@ -33,6 +33,13 @@
   const svgNS = 'http://www.w3.org/2000/svg';
   function svg(markup) { const t = document.createElement('template'); t.innerHTML = markup.trim(); return t.content.firstChild; }
 
+  function conceptDisclosure() {
+    return h('aside', { class: 'concept-disclosure', 'aria-label': 'Important concept limitations' },
+      h('strong', { text: 'AI-generated concept · Not a tested product' }),
+      h('p', { text: 'Proposed advantages are hypotheses, not proof of performance, safety or originality. Prices and plans are estimates; renders are illustrations. Verify claims, rights and safety with qualified professionals before building, selling or investing.' }),
+      h('a', { href: href('/about'), 'data-route': '/about', text: 'Read important limitations' }));
+  }
+
   // ---------- api ----------
   async function api(path, opts = {}) {
     const res = await fetch(API + path, {
@@ -259,7 +266,7 @@
     const tagline = h('p', { class: 'v-tagline' });
     const desc = h('p', { class: 'v-desc' });
     const cat = h('div', { class: 'v-cat' });
-    const head = h('header', { class: 'v-head' }, prov, name, tagline, desc, cat);
+    const head = h('header', { class: 'v-head' }, prov, name, tagline, desc, cat, conceptDisclosure());
     const refinement = h('section', { class: 'refinement hidden', 'aria-label': 'One optional refinement' });
     let refinementDraft = '', refinementState = null, refinementBusy = false;
 
@@ -304,7 +311,7 @@
       svg(`<svg class="seal-mark" viewBox="0 0 54 54" fill="none" aria-hidden="true"><circle cx="27" cy="27" r="25" stroke="currentColor" stroke-width="1"/><circle cx="27" cy="27" r="17" stroke="currentColor" stroke-width=".8" opacity=".5"/><circle cx="27" cy="27" r="4" fill="currentColor"/><path d="M27 2v8M27 44v8M2 27h8M44 27h8" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity=".7"/></svg>`),
       h('div', { class: 'v-label', text: 'Provenance record', style: { marginBottom: '14px' } }),
       sealCode, sealWhen, sealHash,
-      h('p', { class: 'fine', text: 'A SHA-256 hash of the exact words, the exact second, and the creator’s key. It proves this existed, here, first. It is not a patent or a trademark, and MANIFEST never takes ownership of what you make.' }));
+      h('p', { class: 'fine', text: 'A SHA-256 reference to the submitted words, recorded creation time and creator’s key. This is not independent proof of first invention, legal ownership, a patent, trademark or copyright registration.' }));
 
     // owner panel
     const owner = h('div', { class: 'owner hidden' });
@@ -508,7 +515,7 @@
       if (!v.is_owner) { cross.classList.add('hidden'); cross.replaceChildren(); return; }
       const sp = v.splices;
       const kids = [h('h2', { class: 'v-label', text: 'Crossbreed' }),
-        h('p', { class: 'cross-sub', text: 'Splice this with something it should not go with: another venture on the Floor, or a mechanism from a field that has nothing to do with it. The Architect steals one specific thing and grafts it on. Three hybrids, each with the reason it should fail and the reason it does not.' })];
+        h('p', { class: 'cross-sub', text: 'Splice this with something it should not go with: another venture on the Floor, or a mechanism from a field that has nothing to do with it. Three hybrids, each with what could go wrong, why it might perform better or equally well, and a test of that hypothesis.' })];
       const ctl = h('div', { class: 'cross-ctl' });
       const run = async (body, label) => {
         if (crossBusy) return; crossBusy = true;
@@ -546,7 +553,8 @@
         h('h3', { class: 's-name', text: x.name }),
         h('p', { class: 's-stole' }, h('b', { text: 'Stole' }), x.stole),
         h('p', { class: 's-hybrid', text: x.hybrid }),
-        h('div', { class: 's-why' }, h('div', {}, h('b', { text: 'Why it shouldn’t work' }), x.why_not), h('div', {}, h('b', { text: 'Why it does' }), x.why_it_does)),
+        h('div', { class: 's-why' }, h('div', {}, h('b', { text: 'What could go wrong' }), x.why_not), h('div', {}, h('b', { text: 'Why it could work better or equal' }), x.why_it_does)),
+        h('p', { class: 'ground-note', text: 'A proposed mechanism, not proof of performance. Test it against the normal way.' }),
         h('p', { class: 's-test' }, h('b', { text: 'First test' }), x.first_test),
         h('div', { class: 's-foot' }, h('button', { class: 'btn small primary', text: 'Manifest this →', onclick: () => manifestSentence(x.sentence) }),
           h('span', { class: 's-sentence', text: x.sentence })));
@@ -1055,7 +1063,8 @@
       const cs = d.crossbreeds || [];
       if (!cs.length) { crossSec.classList.add('hidden'); return; }
       crossSec.replaceChildren(h('h3', { class: 'v-label', text: 'Crossbreeds' }),
-        h('p', { class: 'arch-facts-sub', text: 'Two real ventures spliced. One mechanism stolen from the donor, grafted onto the host. Anyone can manifest one; it becomes your venture, sealed to you.' }),
+        h('p', { class: 'arch-facts-sub', text: 'Two real ventures spliced. One mechanism borrowed from the donor, grafted onto the host. The hybrid is an untested concept, not a verified product or a grant of intellectual-property rights.' }),
+        conceptDisclosure(),
         h('div', { class: 'splices' }, ...cs.map(c => {
           const host = d.ventures[c.host_slug] || { slug: c.host_slug, name: c.host_slug }, donor = d.ventures[c.donor_slug] || { slug: c.donor_slug, name: c.donor_slug };
           return h('article', { class: 'splice' },
@@ -1063,7 +1072,8 @@
             h('h3', { class: 's-name', text: c.name }),
             h('p', { class: 's-stole' }, h('b', { text: 'Stole' }), c.stole),
             h('p', { class: 's-hybrid', text: c.hybrid }),
-            h('p', { class: 's-test' }, h('b', { text: 'Why it works anyway' }), c.why_it_does),
+            h('p', { class: 's-test' }, h('b', { text: 'Why it could work better or equal' }), c.why_it_does),
+            h('p', { class: 'ground-note', text: 'Proposed benefits are hypotheses unless supported by evidence.' }),
             h('div', { class: 's-foot' }, h('button', { class: 'btn small primary', text: 'Manifest this →', onclick: () => manifestSentence(c.sentence) }), h('span', { class: 's-sentence', text: c.sentence })));
         })));
       crossSec.classList.remove('hidden');
@@ -1109,7 +1119,8 @@
         h('div', { class: 'eyebrow', text: 'The Mix / 01' }),
         h('h1', {}, 'Steal a mechanism.', h('br'), 'Give it a new life.'),
         h('p', { class: 'lead', text: 'Live product research meets ventures already on MANIFEST’s public Floor. Find the useful collision; then give it a first test.' }),
-        h('p', { class: 'mix-disclaimer', text: 'Sources are evidence, not certainty. Floor signals are real public responses—not proof of market demand. Novelty is not guaranteed.' })),
+        h('p', { class: 'mix-disclaimer', text: 'Sources support the ingredients, not the new hybrid’s performance. Floor signals are interest—not sales or proof of demand. Untested advantages are hypotheses; novelty and safety are not guaranteed.' })),
+      conceptDisclosure(),
       h('form', { class: 'mix-research', onsubmit: async (e) => {
         e.preventDefault();
         const value = topic.value.trim();
@@ -1232,6 +1243,8 @@
           h('div', { class: 'mix-details' },
             h('p', {}, h('b', { text: 'Buyer' }), concept.buyer),
             h('p', {}, h('b', { text: 'Why now' }), concept.why_now),
+            h('p', { class: 'mix-comparison' }, h('b', { text: 'Why it could work better or equal' }),
+              concept.why_it_does || 'Comparison unavailable for this older mix. Generate a new mix to see the reasoning.'),
             h('p', {}, h('b', { text: 'First test' }), concept.first_test),
             h('p', {}, h('b', { text: 'Closest existing' }), concept.closest_existing)),
           h('div', { class: 'mix-concept-foot' },
@@ -1242,6 +1255,7 @@
       const floorNames = Array.isArray(data.floor) ? data.floor.map(v => v.name).filter(Boolean) : [];
       output.append(h('aside', { class: 'mix-result-evidence' },
         h('h3', { text: 'Evidence behind this mix' }),
+        h('p', { text: 'Sources support the ingredients, not proof that this new combination performs better. Compare the hypothesis with the normal way in the first test.' }),
         floorNames.length
           ? h('p', { text: `Public Floor ventures included: ${floorNames.join(' · ')}. Signals are not proof of demand.` })
           : h('p', { text: 'No Floor evidence was included in this mix.' }),
@@ -1312,8 +1326,14 @@
       h('div', { class: 'eyebrow', text: 'The record' }),
       h('h2', { text: 'What the provenance record is, and isn’t.' }),
       h('p', { class: 'lead', text: 'When a venture is born, MANIFEST computes a SHA-256 hash of three things: the exact sentence you typed, the exact second it was minted, and your private creator key. That hash is stored with the venture and shown on its page.' }),
-      h('p', { class: 'lead', style: { marginTop: '18px' }, text: 'Because the hash can only be produced from those exact inputs, it proves the sentence existed at that moment and was minted by the holder of that key. Anyone can verify it. Nobody can back-date it.' }),
-      h('p', { class: 'lead', style: { marginTop: '18px' }, text: 'It is not a patent, a trademark, or a copyright registration. Publishing an idea can affect your ability to patent it later, so releasing is your call and yours alone. MANIFEST never takes ownership of anything you make here.' }),
+      h('p', { class: 'lead', style: { marginTop: '18px' }, text: 'The hash provides a reference for checking the recorded inputs. The timestamp is recorded by MANIFEST, not independently certified. This record does not establish first invention, legal ownership or exclusive rights.' }),
+      h('p', { class: 'lead', style: { marginTop: '18px' }, text: 'It is not a patent, a trademark, or a copyright registration. Public disclosure can affect intellectual-property rights; get qualified legal advice before releasing an idea you may want to protect.' }),
+      h('section', { class: 'limitations', 'aria-labelledby': 'limitations-title' },
+        h('h2', { id: 'limitations-title', text: 'Important limitations' }),
+        h('p', { class: 'lead', text: 'MANIFEST generates speculative concepts, comparisons, plans and illustrations with AI. They may contain errors or omissions. A proposed mechanism explains why something might work; it is not evidence that the new product has been built, tested, certified or shown to outperform an alternative.' }),
+        h('p', { class: 'lead', text: 'Where sources are supplied, they support only what those sources actually establish—not every claim about a new combination. Benefits, demand, prices, costs and timelines may be estimates or hypotheses. No result guarantees performance, safety, profit, originality, patentability or freedom from infringement.' }),
+        h('p', { class: 'lead', text: 'Generated content is not professional legal, financial, engineering, medical or safety advice. Independently check claims, supplier information, intellectual-property rights and applicable requirements. Obtain qualified review before building or testing safety-critical products, publishing, selling or investing.' }),
+        h('p', { class: 'lead', text: 'These notices explain the limits of the content; they are not a promise of protection from legal claims and do not remove rights or obligations under applicable law.' })),
       h('div', { style: { marginTop: '40px' } }, h('a', { class: 'btn', href: href('/'), 'data-route': '/', text: '← Back' })));
   }
 
