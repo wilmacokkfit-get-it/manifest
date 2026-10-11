@@ -80,6 +80,16 @@ applied, the retirement endpoint fails explicitly and retains the pending
 request; existing generation and saved-result recovery still work. Do not
 install the retirement RPC without its commit trigger.
 
+For an approved operator check on the connected project, run the entire
+`supabase/manifest-retirement-check.sql` script in Supabase's SQL Editor. It checks
+the insert trigger, RLS and both browser roles' effective table, column and
+function privileges. Its isolated fixtures exercise live/expired requests,
+creator scoping, repeat retirement, reserved/unlimited late-save rejection and
+saved-result precedence using `service_role`. All fixture writes roll back.
+Do not split the script or substitute an existing request ID. This needs SQL
+Editor access because the application role intentionally has no request DELETE
+grant; do not add that grant just to clean up a live test.
+
 ## Checks
 
 `python -m unittest discover -s tests -p 'test_manifest_recovery.py' -v` covers

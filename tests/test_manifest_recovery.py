@@ -415,6 +415,20 @@ class PostgresManifestRecoveryTests(RetirementChecks, unittest.IsolatedAsyncioTe
         quota_fixtures.PostgresAdmissionTests.setUpClass.__func__(cls)
         cls.sql(Path("supabase/manifest-recovery.sql").read_text())
 
+    def test_operator_check_rolls_back_all_fixtures(self):
+        before = self.sql("""
+            select (select count(*) from manifest_requests),
+                   (select count(*) from ventures),
+                   (select count(*) from generation_admissions);
+        """)
+        result = self.sql(Path("supabase/manifest-retirement-check.sql").read_text())
+        self.assertIn("PASS", result)
+        self.assertEqual(before, self.sql("""
+            select (select count(*) from manifest_requests),
+                   (select count(*) from ventures),
+                   (select count(*) from generation_admissions);
+        """))
+
     async def asyncSetUp(self):
         self.sql("truncate manifest_requests, generation_admissions, signals, ventures;")
         self.store = SupabaseStore("https://recovery-pg-fixture.invalid", "fixture-only")
