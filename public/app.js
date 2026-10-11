@@ -290,8 +290,15 @@
     toast('Your saved venture was recovered.');
   }
   function showUnconfirmedManifest(result, requestId) {
-    heroError.textContent = 'This request is still unconfirmed. Reconnect or submit the same sentence to check it again.';
+    heroError.textContent = result.state === 'pending'
+      ? 'Your previous request has not confirmed completion yet. No new generation has been sent.'
+      : 'This previous request is still unconfirmed. Check its result, or safely retire it if its waiting period has ended.';
+    heroError.append(h('button', {
+      class: 'btn small', type: 'button', text: 'Check previous request',
+      onclick: () => resumeManifestRecovery(),
+    }));
     if (result.state !== 'unconfirmed' || pendingManifest()?.legacy) return;
+    heroError.append(' ');
     heroError.append(h('button', {
       class: 'btn small', type: 'button', text: 'Retire abandoned request',
       onclick: () => retireManifest(requestId),
@@ -342,8 +349,11 @@
       return;
     }
     manifestBusy = true;
+    heroError.textContent = 'Checking your previous request… No second generation is being sent.';
     try {
-      const result = await reconcileManifest(pending.request_id);
+      // One bounded lookup on load, not a silent multi-minute polling lock.
+      // The creator can explicitly check again if work is still pending.
+      const result = await reconcileManifest(pending.request_id, 1);
       if (result.state === 'completed') showRecoveredManifest(result.venture, pending.request_id);
       else if (result.state === 'failed' || result.state === 'retired') {
         clearManifest(pending.request_id);
@@ -359,7 +369,10 @@
 
   // ---------- the reveal ----------
   async function startManifest(idea, mixId = null) {
-    if (manifestBusy) return;
+    if (manifestBusy) {
+      heroError.textContent = 'Your request is already being checked or generated. No second generation has been sent.';
+      return;
+    }
     manifestBusy = true;
     let pending = pendingManifest();
     if (pending?.legacy) {
@@ -367,9 +380,10 @@
       showLegacyManifestNotice(pending);
       return;
     }
-    if (pending && (pending.idea !== idea || (pending.mix_id || null) !== mixId)) {
+    if (pending) {
+      heroError.textContent = 'Checking your previous request before starting another…';
       try {
-        const result = await reconcileManifest(pending.request_id);
+        const result = await reconcileManifest(pending.request_id, 1);
         if (result.state === 'completed') { showRecoveredManifest(result.venture, pending.request_id); return; }
         if (!['failed', 'retired'].includes(result.state)) {
           showUnconfirmedManifest(result, pending.request_id);
@@ -481,7 +495,9 @@
           } else if (ev.event === 'done') {
             done = true; completeManifest(ev.data);
           } else if (ev.event === 'error') {
-            throw new Error(ev.data.message || 'The engine stalled.');
+            const error = new Error(ev.data.message || 'The engine stalled.');
+            error.fromServer = true;
+            throw error;
           }
         }
       }
@@ -507,7 +523,8 @@
       if (['failed', 'retired'].includes(result.state)) clearManifest(requestId);
       const failureMessage = err.name === 'AbortError' ?
         'The connection timed out before completion. Your request was checked; you can try again.' : err.message;
-      const message = result.state === 'unavailable' ? result.message : ['failed', 'retired'].includes(result.state) ? failureMessage :
+      const message = err.fromServer ? `${err.message}${['failed', 'retired'].includes(result.state) ? '' : ' Completion is unconfirmed; no second request has been sent.'}` :
+        result.state === 'unavailable' ? result.message : ['failed', 'retired'].includes(result.state) ? failureMessage :
         'The connection ended before completion. This preview is not a confirmed result. Reconnect or submit the same sentence to check again; no second venture will be generated.';
       if (moved) {
         liveStatus.textContent = message;
@@ -519,7 +536,7 @@
         if (pendingManifest()?.legacy) showLegacyManifestNotice(pendingManifest());
         else {
           heroError.textContent = message;
-          if (result.state === 'unconfirmed') showUnconfirmedManifest(result, requestId);
+          if (result.state === 'unconfirmed' && !err.fromServer) showUnconfirmedManifest(result, requestId);
         }
       }
     } finally {

@@ -44,3 +44,16 @@ second saved venture. An informed, separate manual attempt preserves that distin
 **How to apply:** Preserve creator access and saved ventures; remove only the
 acknowledged legacy pending marker. Tracked ambiguous work still needs server-side
 ownership checks and retirement fencing before allowing a replacement.
+
+Persist known pre-save rejections and release their pending allowance before
+sending the stream's error event. Preserve the engine's actual rejection message.
+Once a save has started, retain ambiguous-commit recovery instead.
+
+**Why:** Browsers close a stream as soon as they process an error. Cleanup after
+that event may be cancelled before recording failure, leaving a rejected draft
+looking unfinished and blocking subsequent generations. Generic connection
+wording can also hide a genuine quality rejection.
+
+**How to apply:** Test the recovery state and allowance at the exact error-event
+boundary, not only after the complete response. Do not weaken safety checks to
+eliminate visible rejections, or assume a commit failed because its reply was lost.

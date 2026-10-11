@@ -1,5 +1,30 @@
 const { test, expect } = require('./generation.fixture.cjs');
 
+test('pending recovery: one visible lookup and Manifest checks instead of silently ignoring clicks', async ({ page, harness }) => {
+  test.setTimeout(60000);
+  harness.setRecoveryResult({ state: 'pending' });
+  await page.evaluate(() => localStorage.setItem('manifest.pending-request.v1', JSON.stringify({
+    request_id: 'previous-fixture', idea: 'New drip irrigation line', mix_id: null,
+  })));
+  await page.reload();
+  await expect(page.locator('#hero-error')).toContainText('No new generation');
+  await expect(page.getByRole('button', { name: 'Check previous request' })).toBeVisible();
+  expect(harness.recoveryLookups()).toBe(1);
+  expect(await page.evaluate(() => window.__synthetic.requests.length)).toBe(0);
+  const errorTop = await page.locator('#hero-error').evaluate(el => el.getBoundingClientRect().top);
+  const formTop = await page.locator('#orb-wrap').evaluate(el => el.getBoundingClientRect().top);
+  expect(errorTop).toBeLessThan(formTop);
+  await page.getByRole('button', { name: 'Manifest it' }).click();
+  await expect.poll(() => harness.recoveryLookups()).toBe(2);
+  await expect(page.locator('#hero-error')).toContainText('No new generation');
+  expect(await page.evaluate(() => window.__synthetic.requests.length)).toBe(0);
+  harness.setRecoveryResult({ state: 'unconfirmed' });
+  await page.getByRole('button', { name: 'Check previous request' }).click();
+  await expect(page.getByRole('button', { name: 'Retire abandoned request' })).toBeVisible();
+  expect(harness.recoveryLookups()).toBe(3);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('manifest.pending-request.v1')).request_id)).toBe('previous-fixture');
+});
+
 for (const accept of [false, true]) {
   test(`legacy pending attempt: ${accept ? 'confirmed dismissal allows a separate manual attempt' : 'cancel preserves the pending attempt'}`, async ({ page, harness }) => {
     await page.setViewportSize({ width: 390, height: 844 });

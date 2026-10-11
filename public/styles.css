@@ -65,6 +65,7 @@ main{position:relative;z-index:2;min-height:100vh}
 .forming-status{margin-top:40px;font-family:var(--serif);font-style:italic;font-size:15px;color:var(--fg-50);min-height:1.6em;transition:opacity .4s}
 .hero-tag{margin-top:44px;font-family:var(--serif);font-style:italic;font-size:15.5px;color:var(--fg-50);max-width:480px;text-wrap:balance}
 .hero-error{margin-top:20px;color:#ffb8b8;font-size:13.5px;max-width:460px}
+.hero-error:empty{display:none}
 
 .section{max-width:var(--max);margin:0 auto;padding:140px 24px}
 .section.center{text-align:center}

@@ -118,6 +118,32 @@ class RetirementChecks:
 
 
 class ManifestRecoveryTests(RetirementChecks, unittest.IsolatedAsyncioTestCase):
+    async def test_pre_save_rejection_is_failed_and_released_before_error_event(self):
+        async def text(*args, **kwargs):
+            yield json.dumps(refined_output())
+        original_sse = server._sse
+        errors = []
+        def emit(event, data):
+            if event == "error":
+                row = self.store._db.execute(
+                    "SELECT failed FROM manifest_requests WHERE request_id = ?",
+                    (self.body["request_id"],),
+                ).fetchone()
+                self.assertEqual(row[0], 1)
+                pending = self.store._db.execute(
+                    "SELECT COUNT(*) FROM generation_admissions WHERE consumed = 0"
+                ).fetchone()[0]
+                self.assertEqual(pending, 0)
+                errors.append(data)
+            return original_sse(event, data)
+        with patch.object(server.llm, "stream_venture_text", text), patch.object(
+            server, "require_valid_plan", side_effect=RuntimeError("Synthetic validation rejection")
+        ), patch.object(server, "_sse", emit):
+            response = await self.client.post("/api/manifest", json=self.body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual((await self.lookup()).json()["state"], "failed")
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="manifest-recovery-")
         self.store = SQLiteStore(self.directory.name)

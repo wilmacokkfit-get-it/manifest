@@ -67,6 +67,17 @@ const done = `event: done\ndata: ${JSON.stringify(venture)}\n\n`;
   assert.equal(f.context.pendingManifest(), null);
   assert.equal(f.context.manifestBusy, false);
 
+  // A genuine server rejection must not be replaced by a generic connection
+  // failure even if its terminal recovery lookup is briefly still pending.
+  f = fixture();
+  f.respond([streamResponse('event: error\ndata: {"message":"Qualified review must precede functional testing"}\n\n'),
+    { ok: true, json: async () => ({ state: 'unconfirmed' }) }]);
+  await f.context.startManifest(idea);
+  assert.match(f.context.heroError.textContent, /Qualified review must precede/);
+  assert.match(f.context.heroError.textContent, /Completion is unconfirmed/);
+  assert.ok(f.context.pendingManifest());
+  assert.equal(f.requests.filter(r => r.options.method === 'POST').length, 1);
+
   // Before migration, explicit setup failure precedes a single legacy generation.
   f = fixture();
   f.respond([setupResponse(), streamResponse(done)]);
@@ -94,11 +105,27 @@ const done = `event: done\ndata: ${JSON.stringify(venture)}\n\n`;
   f = fixture();
   const pending = { request_id: randomUUID(), idea, mix_id: null };
   f.context.rememberManifest(pending);
-  f.respond([setupResponse(), setupResponse()]);
+  f.respond([setupResponse()]);
   await f.context.startManifest(idea);
-  assert.equal(f.requests.filter(r => r.options.method === 'POST').length, 1);
-  assert.equal(JSON.parse(f.requests[0].options.body).request_id, pending.request_id);
+  assert.equal(f.requests.filter(r => r.options.method === 'POST').length, 0);
+  assert.match(f.requests[0].url, new RegExp(pending.request_id));
   assert.equal(f.context.pendingManifest().legacy, undefined);
+
+  // Existing pending work gets one visible lookup, not another generation POST,
+  // even when the sentence is unchanged. Busy clicks must not silently vanish.
+  f = fixture();
+  f.context.rememberManifest(pending);
+  f.respond([{ ok: true, json: async () => ({ state: 'pending' }) }]);
+  await f.context.startManifest(idea);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].options.method, undefined);
+  assert.equal(f.context.pendingManifest().request_id, pending.request_id);
+  assert.equal(f.context.manifestBusy, false);
+  assert.match(f.context.heroError.textContent, /No new generation/);
+  f.context.manifestBusy = true;
+  await f.context.startManifest(idea);
+  assert.match(f.context.heroError.textContent, /already being checked or generated/);
+  assert.equal(f.requests.length, 1);
 
   // Retirement is explicit and lookup failures never discard the pending ID.
   f = fixture();

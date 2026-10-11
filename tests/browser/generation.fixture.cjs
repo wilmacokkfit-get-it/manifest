@@ -17,6 +17,8 @@ const test = base.extend({
     const errors = [], unexpected = [];
     let holdRecovery = false;
     const recoveryRequests = [];
+    let recoveryResult = { state: 'failed' };
+    let recoveryLookups = 0;
     page.on('pageerror', e => errors.push(e.message));
     // No request is allowed through to a backend or third-party service.
     await context.route('**/*', async route => {
@@ -26,8 +28,9 @@ const test = base.extend({
         let body;
         if (url.pathname === '/api/ventures/browser-fixture') body = venture;
         else if (url.pathname.startsWith('/api/manifest/requests/')) {
+          recoveryLookups++;
           if (holdRecovery) { recoveryRequests.push(route); return; }
-          body = { state: 'failed' };
+          body = recoveryResult;
         }
         else if (url.pathname === '/api/owner-auth/config') {
           return route.fulfill({ status: 503, json: { error: 'Authentication disabled in isolated tests' } });
@@ -152,6 +155,8 @@ const test = base.extend({
     await use({
       venture,
       holdRecovery() { holdRecovery = true; },
+      setRecoveryResult(result) { recoveryResult = result; },
+      recoveryLookups: () => recoveryLookups,
       recoveryRequests: () => recoveryRequests.length,
       async resolveRecovery(data) {
         await recoveryRequests.at(-1).fulfill({ json: data });

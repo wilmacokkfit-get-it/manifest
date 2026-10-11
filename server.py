@@ -543,8 +543,17 @@ async def manifest(body: ManifestBody, request: Request):
     async def gen():
         buf = ""
         text_completed = False
+        save_started = False
         last_emit = 0.0
         last_key = None
+        async def confirm_pre_save_failure():
+            if not save_started:
+                # An error event makes the browser close the stream immediately.
+                # Persist this known rejection before yielding, not in cleanup
+                # that can be interrupted by that disconnect.
+                if body.request_id:
+                    await _shielded_bounded_call(store.fail_manifest_request(owner, request_id))
+                await _release_admission(admission)
         try:
             yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at,
                                "request_id": request_id if body.request_id else None,
@@ -578,18 +587,22 @@ async def manifest(body: ManifestBody, request: Request):
                 "images": [], "images_status": "pending" if (llm.image_provider() != "none" and data["image_prompts"]) else "failed",
                 "visibility": "private", "status": "ready",
             }
+            save_started = True
             saved = await _shielded_bounded_call(
                 store.create_reserved_venture(admission, row) if admission else store.create_venture(row))
             if saved["images_status"] == "pending":
                 asyncio.create_task(_render_images(saved))
             yield _sse("done", _public_view(saved, is_owner=True, unlimited=unlimited))
         except HTTPException as e:
+            await confirm_pre_save_failure()
             yield _sse("error", {"message": e.detail})
         except TimeoutError:
+            await confirm_pre_save_failure()
             message = ("Generation reached its two-minute limit. No venture was saved. Please try again."
                        if not text_completed else "Saving took too long. Check your ventures before trying again.")
             yield _sse("error", {"message": message})
         except Exception as e:  # noqa: BLE001
+            await confirm_pre_save_failure()
             yield _sse("error", {"message": f"The engine stalled: {str(e)[:200]}"})
         finally:
             # Only pending entries are released; a successful atomic commit is
