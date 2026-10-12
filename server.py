@@ -542,8 +542,8 @@ async def manifest(body: ManifestBody, request: Request):
 
     async def gen():
         buf = ""
-        text_completed = False
         save_started = False
+        correction_started = False
         last_emit = 0.0
         last_key = None
         async def confirm_pre_save_failure():
@@ -558,7 +558,8 @@ async def manifest(body: ManifestBody, request: Request):
             yield _sse("meta", {"provenance": prov, "owner_token": owner, "created_at": created_at,
                                "request_id": request_id if body.request_id else None,
                                "recovery_supported": bool(body.request_id)})
-            # A bounded worker cannot outlive its five-minute database lease.
+            # Initial text AND the single correction share this deadline and
+            # the original claim, allowance, venture ID and provenance.
             with anyio.fail_after(TEXT_TIMEOUT_SECONDS):
                 avoid = [] if chosen else await store.recent_concepts(owner)
                 stream_options = {"angle": angle, "avoid": avoid}
@@ -571,13 +572,38 @@ async def manifest(body: ManifestBody, request: Request):
                     if obj and (now - last_emit > 0.07 or key != last_key):
                         last_emit, last_key = now, key
                         yield _sse("partial", {"data": obj, "streaming": key})
-            text_completed = True
-            obj = json.loads(buf)
-            if not isinstance(obj, dict) or not obj.get("name"):
-                raise RuntimeError("The engine returned nothing usable.")
-            require_valid_plan(obj, idea)
-            data = _normalize(obj)
-            require_valid_plan(data, idea)
+                obj = json.loads(buf)
+                if not isinstance(obj, dict) or not obj.get("name"):
+                    raise RuntimeError("The engine returned nothing usable.")
+                try:
+                    require_valid_plan(obj, idea)
+                    data = _normalize(obj)
+                    require_valid_plan(data, idea)
+                except PlanValidationError as rejected:
+                    correction_started = True
+                    original_name = obj.get("name")
+                    print("[manifest] correcting draft: " + ", ".join(rejected.findings), flush=True)
+                    yield _sse("status", {
+                        "phase": "correcting",
+                        "message": "Refining your draft while keeping your original concept.",
+                    })
+                    corrected = ""
+                    async for chunk in llm.stream_venture_correction_text(
+                        idea, obj, list(rejected.findings), angle=angle if chosen else None,
+                    ):
+                        corrected += chunk
+                    # Hold correction text back until BOTH checks pass. Never
+                    # display or save another rejected build plan as a result.
+                    obj = _complete_refinement(corrected)
+                    # Corrections can otherwise gratuitously rebrand the same
+                    # venture. Preserve its established draft identity; all
+                    # claims, including the name, still face the checks below.
+                    if isinstance(original_name, str):
+                        obj["name"] = original_name
+                    require_valid_plan(obj, idea)
+                    data = _normalize(obj)
+                    require_valid_plan(data, idea)
+                    yield _sse("partial", {"data": obj, "streaming": None, "replace": True})
             slug = await asyncio.to_thread(unique_slug, data["name"], store.slug_exists)
             row = {
                 "id": venture_id,
@@ -603,12 +629,23 @@ async def manifest(body: ManifestBody, request: Request):
             yield _sse("error", {"message": e.detail})
         except TimeoutError:
             await confirm_pre_save_failure()
-            message = ("Generation reached its two-minute limit. No venture was saved. Please try again."
-                       if not text_completed else "Saving took too long. Check your ventures before trying again.")
-            yield _sse("error", {"message": message})
+            message = ("Saving took too long. Check your ventures before trying again." if save_started
+                       else "Draft correction reached the shared two-minute generation limit. Nothing was saved. Please try again."
+                       if correction_started else "Generation reached its two-minute limit. No venture was saved. Please try again.")
+            yield _sse("error", {
+                "message": message,
+                "code": "draft_correction_failed" if correction_started and not save_started else None,
+            })
         except Exception as e:  # noqa: BLE001
             await confirm_pre_save_failure()
-            yield _sse("error", {"message": f"The engine stalled: {str(e)[:200]}"})
+            if correction_started and not save_started:
+                print("[manifest] correction failed: " + type(e).__name__, flush=True)
+                yield _sse("error", {
+                    "code": "draft_correction_failed",
+                    "message": "The draft could not be corrected within this request. Nothing was saved. Please try again.",
+                })
+            else:
+                yield _sse("error", {"message": f"The engine stalled: {str(e)[:200]}"})
         finally:
             # Only pending entries are released; a successful atomic commit is
             # never refunded even if the client disconnects before seeing done.

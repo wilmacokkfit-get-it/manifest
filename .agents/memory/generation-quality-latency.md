@@ -39,3 +39,16 @@ revenue or safety-sequencing errors after prompt improvements.
 testing commands. Keep validation hard, distinguish rejected drafts from
 connection/provider stalls, and do not claim generation is fixed while live
 output still fails. Log only fixed rejection codes, never raw ideas or drafts.
+
+Internal draft correction is one bounded pass inside the original generation,
+not a new submission or the visitor's optional context refinement.
+
+**Why:** Asking creators to retry rejected AI drafts leaves the generator's own
+mistakes with the user. Re-admitting work or resetting deadlines risks duplicate
+ventures, extra allowances, and workers outliving their recovery leases.
+
+**How to apply:** Preserve the request identity, name, provenance, selected Mix
+mechanisms and allowance. Share the initial text deadline, validate raw and
+normalized correction before saving, hide rejected build steps while correcting,
+and replace the preview rather than leaving stale steps. No endless retries or
+silent acceptance when a correction still fails.

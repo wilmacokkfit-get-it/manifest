@@ -63,10 +63,10 @@
   function generationWait(operation, paint, limitMs = 210000) {
     const started = performance.now();
     const controller = new AbortController();
-    let firstText = false, stopped = false, cancelled = false;
+    let firstText = false, stopped = false, cancelled = false, stageLabel = null;
     const tick = () => {
       const seconds = Math.floor((performance.now() - started) / 1000);
-      paint(`${firstText ? 'Writing' : 'Considering your idea'}… ${seconds}s. ${seconds >= 30 ? 'Still working; text generation has a two-minute limit.' : 'Text appears when it is ready.'}`);
+      paint(`${stageLabel || (firstText ? 'Writing' : 'Considering your idea')}… ${seconds}s. ${seconds >= 30 ? 'Still working; text generation has a two-minute limit.' : 'Text appears when it is ready.'}`);
     };
     tick();
     const timer = setInterval(tick, 1000);
@@ -76,6 +76,7 @@
       signal: controller.signal,
       get cancelled() { return cancelled; },
       first() { if (!firstText) { firstText = true; measure('first-visible-text'); tick(); } },
+      stage(label) { stageLabel = label; tick(); },
       finish(outcome = 'completed') {
         if (stopped) return;
         stopped = true; clearInterval(timer); clearTimeout(deadline);
@@ -478,10 +479,20 @@
           const ev = parseSSE(raw);
           if (!ev) continue;
           if (ev.event === 'meta') meta = ev.data;
+          else if (ev.event === 'status' && ev.data.phase === 'correcting') {
+            wait.stage('Refining your draft');
+            if (view) view.beginCorrection?.();
+          }
           else if (ev.event === 'partial') {
             wait.first();
             const { data, streaming } = ev.data;
-            if (!moved) {
+            if (ev.data.replace && moved) {
+              // Rebuild, rather than retaining old tiers/steps that the
+              // corrected draft may have removed or substantially changed.
+              view = VentureView({ live: { meta, data, streaming, idea } });
+              view.prepend(liveStatus);
+              mount(view, null);
+            } else if (!moved) {
               formingName.textContent = data.name || '';
               formingName.classList.toggle('caret', streaming === 'name');
               if (data.name && streaming && streaming !== 'name') {
@@ -506,7 +517,7 @@
       await reader.cancel();
     } catch (err) {
       if (wait.cancelled) return;
-      if (err.code === 'draft_rejected' && view) view.markRejected?.();
+      if (['draft_rejected', 'draft_correction_failed'].includes(err.code) && view) view.markRejected?.();
       // Stop the old stream before lookup, but never POST another generation.
       if (reader) { try { await reader.cancel(); } catch (_) {} }
       // Abort the original connection and stop feedback, but keep this operation
@@ -1277,6 +1288,12 @@
     }
 
     root.update = update;
+    root.beginCorrection = () => {
+      prov.textContent = 'Draft · refining the plan';
+      tiers.classList.add('hidden');
+      roadmap.classList.add('hidden');
+      root.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
+    };
     root.markRejected = () => {
       prov.textContent = 'Unreviewed draft · not saved';
       tiers.classList.add('hidden');

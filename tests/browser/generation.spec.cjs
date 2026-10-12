@@ -196,6 +196,42 @@ for (const operation of ['venture', 'path']) {
   }
 }
 
+test('venture: correction keeps feedback and replaces the rejected preview before completion', async ({ page, harness }) => {
+  test.setTimeout(60000);
+  await harness.start('venture');
+  await harness.send('partial', {
+    data: {
+      name: 'Canopy', tagline: 'A speculative bench-clamped ladder',
+      description: 'An unusual clamp mechanism.',
+      tiers: [{ label: 'The Lean Build', title: 'Unsafe prototype', description: 'Synthetic rejected instructions.' }],
+      roadmap: [{ step: 1, action: 'Rejected build step', where: 'Not instructions to execute.' }],
+    },
+    streaming: 'roadmap',
+  });
+  await expect(page.getByText('Unsafe prototype', { exact: true })).toBeVisible();
+  await harness.send('status', { phase: 'correcting' });
+  await expect(page.locator('.venture > [role=status]')).toContainText('Refining your draft');
+  await expect(page.getByText('Draft · refining the plan', { exact: true })).toBeVisible();
+  await expect(page.getByText('Unsafe prototype', { exact: true })).toBeHidden();
+  await page.clock.runFor(12000);
+  await expect(page.locator('.venture > [role=status]')).toContainText('Refining your draft… 12s');
+  const repaired = {
+    ...harness.venture, name: 'Canopy',
+    tiers: [{ label: 'The Lean Build', title: 'Paper fit study', description: 'A nonfunctional concept and qualified review.' }],
+    roadmap: [{ step: 1, action: 'Request qualified review', where: 'A nonfunctional professional design review.' }],
+  };
+  await harness.send('partial', { data: repaired, streaming: null, replace: true });
+  await expect(page.getByText('Paper fit study', { exact: true })).toBeVisible();
+  await expect(page.getByText('Unsafe prototype', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Rejected build step', { exact: true })).toHaveCount(0);
+  await harness.send('done', repaired);
+  await expect(page).toHaveURL('https://manifest.test/v/browser-fixture');
+  expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
+  const measures = await harness.measures('venture');
+  expect(measures.filter(entry => entry.name.endsWith('.first-visible-text'))).toHaveLength(1);
+  expect(measures.filter(entry => entry.name.endsWith('.completed'))).toHaveLength(1);
+});
+
 test('venture: rejected draft is not shown as minting or a stalled connection', async ({ page, harness }) => {
   test.setTimeout(60000);
   await harness.start('venture');
