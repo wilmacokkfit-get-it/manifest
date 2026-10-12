@@ -1,4 +1,5 @@
 - [SSE cancellation scopes](sse-cancel-scopes.md) — heartbeat wrappers must drive generators in one persistent task so AnyIO scope ownership survives yields.
+- [Request task observation](request-task-observation.md) — AnyIO wrappers obscure coroutine origins; use inherited request context when auditing cleanup.
 - [Python hook environment](python-hook-environment.md) — system pip and sysconfig can resolve to immutable Nix paths even when the project-local Python launcher is active.
 - [Supabase validation boundaries](supabase-validation.md) — successful Storage authentication does not prove access to database tables; validate both before switching backends.
 - [Private image delivery](private-image-delivery.md) — prefer per-request creator checks over bearer-style signed URLs for unreleased renders.
