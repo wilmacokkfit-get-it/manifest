@@ -14,7 +14,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from app import llm
-from app.plan_quality import blocking_findings, require_valid_plan
+from app.plan_quality import PlanValidationError, blocking_findings, require_valid_plan
 from app.quality_evaluation import evaluate
 from scripts.quality_cases import CASES, fixture
 from scripts.evaluate_plan_quality import run
@@ -25,6 +25,62 @@ private_venture = regression.private_venture
 
 
 class QualityEvaluationTests(unittest.TestCase):
+    def test_review_with_qualified_engineer_is_recognized_before_build(self):
+        plan = fixture("physical")
+        plan["roadmap"][0] = {
+            "action": "Review a nonfunctional paper concept with a qualified engineer.",
+            "where": "Request a professional assessment of the mounting assumptions.",
+        }
+        self.assertEqual(blocking_findings(plan, "A ladder"), [])
+        plan["roadmap"][0]["where"] = "Wire the test rig and build a functional ladder before review."
+        self.assertIn("review_after_functional_work", blocking_findings(plan, "A ladder"))
+        plan["roadmap"][0] = {
+            "action": "Review mounting assumptions and test loads with weights.",
+            "where": "Request a qualified engineer's review afterward.",
+        }
+        self.assertIn("review_after_functional_work", blocking_findings(plan, "A ladder"))
+
+    def test_planning_test_loads_and_forbidding_construction_are_not_build_commands(self):
+        plan = fixture("physical")
+        plan["tiers"][0]["description"] = (
+            "Use paper drawings with a structural engineer to review assumptions "
+            "and define test loads before any functional build. "
+            "Functional construction is explicitly forbidden until the review clears design."
+        )
+        self.assertNotIn("ungated_functional_lean_build", blocking_findings(plan, "A ladder"))
+        plan["tiers"][0]["description"] += " Then test the ladder by climbing it."
+        self.assertIn("ungated_functional_lean_build", blocking_findings(plan, "A ladder"))
+
+    def test_rejection_explains_draft_problem_not_a_connection_stall(self):
+        plan = fixture("electrical")
+        plan["description"] += " This product is fully compliant."
+        with self.assertRaises(PlanValidationError) as rejected:
+            require_valid_plan(plan)
+        self.assertIn("unsupported_certification", rejected.exception.findings)
+        self.assertIn("Draft needs correction", str(rejected.exception))
+        self.assertIn("without evidence", str(rejected.exception))
+
+    def test_field_level_review_template_keeps_unconventional_ladder_concept(self):
+        plan = fixture("physical")
+        plan["description"] = "A modular greenhouse ladder clamped to bench rails; this untested mechanism needs engineering review."
+        plan["tiers"][0]["description"] = (
+            "Use a nonfunctional paper mockup to interview greenhouse workers; "
+            "budget an estimated $30. Qualified structural review is required "
+            "before any functional construction or testing."
+        )
+        plan["roadmap"][0] = {
+            "step": 1,
+            "action": "Review a nonfunctional concept with a qualified specialist.",
+            "where": (
+                "Request a qualified structural engineer's review of mounting and "
+                "load assumptions and a professional validation plan. Interview "
+                "five workers with paper drawings; a proposed criterion is three "
+                "identifying the same access bottleneck, otherwise revise fit."
+            ),
+        }
+        self.assertEqual(blocking_findings(plan, "A greenhouse ladder"), [])
+        self.assertIn("clamped to bench rails", plan["description"])
+
     def test_four_representative_fixtures_pass_signals_but_require_human_review(self):
         for case, spec in CASES.items():
             with self.subTest(case=case):
@@ -209,6 +265,10 @@ class QualityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("event: done", response.text)
         self.assertEqual(self.store._db.execute("SELECT count(*) FROM ventures").fetchone()[0], 0)
         self.assertEqual(self.store._db.execute("SELECT count(*) FROM generation_admissions WHERE consumed = 0").fetchone()[0], 0)
+        events = [json.loads(block.split("data: ", 1)[1])
+                  for block in response.text.split("\n\n") if block.startswith("event: error")]
+        self.assertEqual(events[0]["code"], "draft_rejected")
+        self.assertNotIn("The engine stalled", events[0]["message"])
 
     async def test_invalid_refinement_preserves_original_and_clears_claim(self):
         row = await self.store.create_venture({

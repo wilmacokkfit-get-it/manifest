@@ -24,7 +24,11 @@ def matches(pattern, text):
 
 
 HAZARD = r"\b(electrical|electric|mains|voltage|wiring|battery|desk (?:light|lamp)|ladder|load.bearing|structural|food.contact|medical|gas burner|pressure vessel)\b"
-REVIEW = r"\b(qualified|licensed|accredited)\b.{0,120}\b(review\w*|assess\w*|approv\w*)"
+REVIEW = (
+    r"(?:\b(qualified|licensed|accredited)\b.{0,120}\b(review\w*|assess\w*|approv\w*)"
+    r"|\b(review\w*|assess\w*|approv\w*)\b.{0,120}\b(?:by|with|from)\b"
+    r".{0,50}\b(qualified|licensed|accredited)\b)"
+)
 FUNCTIONAL = r"\b(build\w*|assembl\w*|wir(?:e|ing)|weld\w*|solder\w*|bend\w*|energiz\w*|power\w*|load.test\w*|test\w*|prototyp\w*|fabricat\w*|construct\w*|install\w*|hang\w*|functional pilot)\b"
 NONFUNCTIONAL = r"\b(non[- ]?functional|unpowered|paper|cardboard|mockup|mock-up|interview|survey|sketch|render|drawing)\b"
 PHYSICAL_WORK = r"\b(wire|weld\w*|solder\w*|energiz\w*|power|load.test\w*|hang|install\w*|(?<!non-)(?<!non )functional (?:prototyp\w*|pilot|construct\w*|test\w*))\b"
@@ -53,6 +57,14 @@ def _functional(text):
     for sentence in re.split(r"[.!?;\n]", text):
         planning = matches(r"\b(?:review\w*|assess\w*|defin\w*|document\w*|request\w*)\b", sentence)
         for clause in re.split(r",|\b(?:and|then|but)\b", sentence, flags=re.I):
+            if matches(
+                r"^\s*functional (?:construction|testing)\s+is\s+"
+                r"(?:(?:explicitly|strictly)\s+)?(?:forbidden|prohibited|blocked)\s+"
+                r"until\s+(?:the\s+)?(?:qualified\s+)?review"
+                r"(?:\s+clears(?:\s+the)?\s+design)?\s*$",
+                clause,
+            ):
+                continue
             # A description of review *before* future work is not conducting
             # that work. "Wire before review" retains the wire instruction.
             clause = re.split(r"\b(?:before|prior to)\b", clause, maxsplit=1, flags=re.I)[0]
@@ -63,7 +75,13 @@ def _functional(text):
             if matches(FUNCTIONAL, clause) and not matches(NONFUNCTIONAL, clause):
                 # Nominal "fabrication and supervised tests" can be objects of
                 # "define a plan"; direct build/test instructions cannot.
-                if not planning or matches(DIRECT_WORK, clause):
+                direct_work = re.sub(
+                    r"\b(?:define|document|review|assess|request)\w*\s+"
+                    r"(?:(?:the|proposed|a)\s+)?test\s+"
+                    r"(?:loads?|plans?|protocols?|requirements?|criteria|results|reports)\b",
+                    "", clause, flags=re.I,
+                )
+                if not planning or matches(DIRECT_WORK, direct_work):
                     return True
     return False
 
@@ -137,10 +155,31 @@ def blocking_findings(plan: dict, idea: str = "", *, path: bool = False) -> list
     return list(dict.fromkeys(codes))
 
 
-def require_valid_plan(plan: dict, idea: str = "", *, path: bool = False) -> None:
-    if blocking_findings(plan, idea, path=path):
-        raise RuntimeError(
-            "This plan failed the factual/safety checks and was not saved. "
-            "Try again with a nonfunctional first test and qualified review. "
-            "Generated plans are not safety advice or certification."
+class PlanValidationError(RuntimeError):
+    """A completed draft rejection, distinct from a provider/connection failure."""
+
+    def __init__(self, findings: list[str]):
+        self.findings = tuple(findings)
+        reasons = []
+        if any(code in findings for code in (
+            "review_after_functional_work", "missing_qualified_review",
+            "ungated_functional_lean_build", "hazardous_first_move",
+        )):
+            reasons.append(
+                "The draft must put qualified safety review before functional "
+                "construction or testing, including in the lean build."
+            )
+        if "unsupported_certification" in findings or "unsupported_guarantee" in findings:
+            reasons.append("The draft made a certification or guarantee claim without evidence.")
+        if "refundable_deposits_as_revenue" in findings:
+            reasons.append("Refundable reservations cannot be counted as earned revenue.")
+        super().__init__(
+            "Draft needs correction—not saved. " + " ".join(reasons)
+            + " The factual/safety checks remain in place; this is not a connection stall."
         )
+
+
+def require_valid_plan(plan: dict, idea: str = "", *, path: bool = False) -> None:
+    findings = blocking_findings(plan, idea, path=path)
+    if findings:
+        raise PlanValidationError(findings)

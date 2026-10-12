@@ -196,6 +196,32 @@ for (const operation of ['venture', 'path']) {
   }
 }
 
+test('venture: rejected draft is not shown as minting or a stalled connection', async ({ page, harness }) => {
+  test.setTimeout(60000);
+  await harness.start('venture');
+  await harness.send('partial', {
+    data: {
+      name: 'Canopy', tagline: 'A speculative bench-clamped ladder',
+      description: 'An unconventional clamp mechanism; not a validated load-bearing design.',
+      tiers: [{ label: 'The Lean Build', title: 'Unsafe prototype', description: 'Synthetic rejected construction instructions.' }],
+      roadmap: [{ step: 1, action: 'Synthetic rejected build', where: 'Not instructions to execute.' }],
+    },
+    streaming: 'roadmap',
+  });
+  await expect(page.getByText('Unsafe prototype', { exact: true })).toBeVisible();
+  const message = 'Draft needs correction—not saved. Qualified safety review must precede construction.';
+  await harness.send('error', { code: 'draft_rejected', message });
+  await expect(page.getByText('Unreviewed draft · not saved', { exact: true })).toBeVisible();
+  await expect(page.getByText('Unsafe prototype', { exact: true })).toBeHidden();
+  await expect(page.getByText('Synthetic rejected build', { exact: true })).toBeHidden();
+  await expect(page.locator('.venture > [role=status]')).toContainText(message);
+  await expect(page.getByText(/minting…/)).toHaveCount(0);
+  expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
+  await page.getByRole('link', { name: 'Return to your ventures' }).click();
+  await page.clock.runFor(1000);
+  await expect(page.getByRole('button', { name: 'Manifest it' })).toBeEnabled();
+});
+
 test('refinement: provider error preserves result, context, and retry', async ({ page, harness }) => {
   await harness.start('refinement');
   await harness.json({ error: 'Synthetic provider unavailable' }, 502);

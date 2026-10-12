@@ -23,7 +23,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from app.plan_quality import require_valid_plan
+from app.plan_quality import PlanValidationError, require_valid_plan
 from app.store import ManifestRecoveryUnavailable
 
 ROOT = Path(__file__).resolve().parent
@@ -593,6 +593,11 @@ async def manifest(body: ManifestBody, request: Request):
             if saved["images_status"] == "pending":
                 asyncio.create_task(_render_images(saved))
             yield _sse("done", _public_view(saved, is_owner=True, unlimited=unlimited))
+        except PlanValidationError as e:
+            # Fixed rule names only: never log the creator's idea or draft.
+            print("[manifest] draft rejected: " + ", ".join(e.findings), flush=True)
+            await confirm_pre_save_failure()
+            yield _sse("error", {"code": "draft_rejected", "message": str(e)})
         except HTTPException as e:
             await confirm_pre_save_failure()
             yield _sse("error", {"message": e.detail})

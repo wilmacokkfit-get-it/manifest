@@ -497,6 +497,7 @@
           } else if (ev.event === 'error') {
             const error = new Error(ev.data.message || 'The engine stalled.');
             error.fromServer = true;
+            error.code = ev.data.code;
             throw error;
           }
         }
@@ -505,6 +506,7 @@
       await reader.cancel();
     } catch (err) {
       if (wait.cancelled) return;
+      if (err.code === 'draft_rejected' && view) view.markRejected?.();
       // Stop the old stream before lookup, but never POST another generation.
       if (reader) { try { await reader.cancel(); } catch (_) {} }
       // Abort the original connection and stop feedback, but keep this operation
@@ -1275,6 +1277,12 @@
     }
 
     root.update = update;
+    root.markRejected = () => {
+      prov.textContent = 'Unreviewed draft · not saved';
+      tiers.classList.add('hidden');
+      roadmap.classList.add('hidden');
+      root.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
+    };
     root.complete = complete;
     root.cleanup = stopPolling;
     return root;

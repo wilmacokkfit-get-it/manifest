@@ -25,3 +25,17 @@ wording and placed qualified review after functional prototyping.
 **Why:** Prompt instructions alone did not prevent these failures. Preserve
 fictional output-quality evaluations and human inspection as a separate check;
 never infer safety from well-formed JSON or an automated signal pass.
+
+Review-order checks must recognize both “qualified engineer review” and “review
+with a qualified engineer.” Planning phrases such as “define test loads” are
+not themselves instructions to conduct physical tests.
+
+**Why:** Live structural concept checks rejected drafts that contained prior
+professional review because the recognizer only accepted one word order and
+treated test-planning nouns as imperatives. Other drafts still made genuine
+revenue or safety-sequencing errors after prompt improvements.
+
+**How to apply:** Test equivalent review phrasings alongside actual build/load
+testing commands. Keep validation hard, distinguish rejected drafts from
+connection/provider stalls, and do not claim generation is fixed while live
+output still fails. Log only fixed rejection codes, never raw ideas or drafts.
