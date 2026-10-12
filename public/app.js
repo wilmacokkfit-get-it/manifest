@@ -143,7 +143,7 @@
     for (const wait of activeGenerationWaits) wait.cancel();
     const route = currentRoute();
     setAccent(null);
-    if (route === '/') { mount(null, '/'); resetHero(); checkReveals(); return; }
+    if (route === '/') { mount(null, '/'); resetHero(); checkReveals(); resumeManifestRecovery(); return; }
     if (route.startsWith('/v/')) { mount(VentureView({ slug: route.slice(3) }), null); return; }
     if (route === '/marketplace') { mount(FloorView(), '/marketplace'); return; }
     if (route === '/waitlist') { mount(WaitlistView(), '/waitlist'); return; }
@@ -294,21 +294,33 @@
     heroError.textContent = result.state === 'pending'
       ? 'Your previous request has not confirmed completion yet. No new generation has been sent.'
       : 'This previous request is still unconfirmed. Check its result, or safely retire it if its waiting period has ended.';
-    heroError.append(h('button', {
+    appendManifestRecoveryActions(heroError, result, requestId);
+  }
+  function appendManifestRecoveryActions(target, result, requestId) {
+    target.append(h('button', {
       class: 'btn small', type: 'button', text: 'Check previous request',
-      onclick: () => resumeManifestRecovery(),
+      onclick: () => {
+        if (target !== heroError) go('/');
+        else resumeManifestRecovery();
+      },
     }));
     if (result.state !== 'unconfirmed' || pendingManifest()?.legacy) return;
-    heroError.append(' ');
-    heroError.append(h('button', {
+    target.append(' ');
+    target.append(h('button', {
       class: 'btn small', type: 'button', text: 'Retire abandoned request',
-      onclick: () => retireManifest(requestId),
+      onclick: () => retireManifest(requestId, target),
     }));
   }
-  async function retireManifest(requestId) {
+  async function retireManifest(requestId, target = heroError) {
     if (manifestBusy || pendingManifest()?.request_id !== requestId) return;
     if (!confirm('Retire this abandoned request? If it has already saved, your venture will be recovered. Otherwise it will be permanently blocked from saving, so you can start a new request.')) return;
     manifestBusy = true;
+    const notice = text => {
+      target.textContent = text;
+      if (target !== heroError) {
+        target.append(h('a', { href: href('/'), 'data-route': '/', text: ' Return to your ventures.' }));
+      }
+    };
     try {
       const response = await fetch(API + `/api/manifest/requests/${encodeURIComponent(requestId)}/retire`, {
         method: 'POST', credentials: 'same-origin', cache: 'no-store',
@@ -317,7 +329,7 @@
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
         if (error.code === 'manifest_recovery_unavailable') {
-          heroError.textContent = error.error;
+          notice(error.error);
           return;
         }
         throw new Error('Retirement could not be confirmed.');
@@ -326,14 +338,14 @@
       if (result.state === 'completed' && result.venture) showRecoveredManifest(result.venture, requestId);
       else if (result.state === 'retired') {
         clearManifest(requestId);
-        heroError.textContent = 'The abandoned request is permanently retired. You can now submit a new idea.';
+        notice('The abandoned request is permanently retired. You can now submit a new idea.');
       } else {
-        heroError.textContent = 'This request is still active and cannot be retired yet. Check it again after its waiting period.';
+        notice('This request is still active and cannot be retired yet. Check it again after its waiting period.');
       }
     } catch (_) {
       // A lost retirement response is ambiguous too. Keep the identity so GET
       // recovery can confirm the durable fence before any new submission.
-      heroError.textContent = 'Retirement is unconfirmed. Reconnect or check the same request again; no new request has been sent.';
+      notice('Retirement is unconfirmed. Reconnect or check the same request again; no new request has been sent.');
     } finally { manifestBusy = false; }
   }
   async function resumeManifestRecovery() {
@@ -388,6 +400,13 @@
         if (result.state === 'completed') { showRecoveredManifest(result.venture, pending.request_id); return; }
         if (!['failed', 'retired'].includes(result.state)) {
           showUnconfirmedManifest(result, pending.request_id);
+          return;
+        }
+        // Another tab may have retired this identity and started different
+        // work while the lookup was in flight. Never replace that newer UUID.
+        const current = pendingManifest();
+        if (current && current.request_id !== pending.request_id) {
+          showUnconfirmedManifest({ state: 'pending' }, current.request_id);
           return;
         }
         clearManifest(pending.request_id);
@@ -542,6 +561,9 @@
       if (moved) {
         liveStatus.textContent = message;
         view.querySelectorAll('.caret').forEach(el => el.classList.remove('caret'));
+        if (result.state === 'unconfirmed' || result.state === 'pending') {
+          appendManifestRecoveryActions(liveStatus, result, requestId);
+        }
         liveStatus.append(h('a', { href: href('/'), 'data-route': '/', text: ' Return to your ventures.' }));
         toast(message);
       } else {
@@ -1735,6 +1757,6 @@
 
   // ---------- start ----------
   render();
-  resumeManifestRecovery();
+  if (currentRoute() !== '/') resumeManifestRecovery();
   setTimeout(checkReveals, 50);
 })();

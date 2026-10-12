@@ -20,6 +20,17 @@ Use a secure synthetic origin
 because request identity creation depends on secure-context crypto APIs.
 Synthetic browser checks do not verify a hosting proxy's idle behavior.
 
+Treat retirement confirmation as user consent, not as a cross-tab lock. A
+terminal response for an old identity does not authorize replacing newer work
+started in another tab.
+
+**Why:** Network replies can arrive after another tab has retired an identity
+and begun a replacement; confirmation dialogs only pause the confirming page.
+
+**How to apply:** Exercise held lookup and retirement replies with real shared
+browser storage, including a different-sentence submission already waiting on
+the old lookup. Keep server save/retirement serialization a separate check.
+
 Keep raw HTTP wait measurements separate from creator-UI measurements when
 testing a published proxy. Do not use real generation requests as probes.
 

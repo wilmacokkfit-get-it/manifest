@@ -16,7 +16,7 @@ WebKit must use Playwright's matching patched builds, not ordinary system
 Firefox or Safari. `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can select another Chromium
 executable; Replit defaults to its system Chromium.
 
-The default run executes the same 20 cases in each of four projects:
+The default run executes the waiting and recovery cases in each of four projects:
 The configured `browser-waiting` validation installs matching browsers first,
 then runs this full matrix with three workers.
 
@@ -110,7 +110,38 @@ override that location.
   response and cannot test UI updates between SSE chunks. This tests client-side
   abort/body consumption, not a real socket's browser-specific disconnect text.
 
-The completed local matrix passed **80/80** cases with three workers.
+## Two-tab retirement checks
+
+`tests/browser/retirement.spec.cjs` uses the same intercepted fixture and secure
+synthetic origin, with two real pages in one browser context sharing localStorage.
+Held GET and retirement POST replies are released explicitly; no sleeps or
+provider/server/database calls are needed. The fixture records generation UUIDs
+across both tabs and reloads, and rejects unmocked API requests.
+
+Run just this scope in Chromium:
+
+```sh
+npm run test:browser -- tests/browser/retirement.spec.cjs --project=chromium --workers=3
+```
+
+The checks cover:
+
+- Confirmation cancellation preserves the shared pending identity; confirmed
+  retirement sends no generation, and reload/different sentences get a fresh UUID.
+- Delayed retired/completed lookup replies, both on load and during submission,
+  cannot clear or replace another tab's newer pending identity.
+- Delayed retirement replies preserve that newer identity too.
+- Save-wins retirement and delayed completed lookup recover the saved venture;
+  reloading its result page still retrieves it without generating again.
+- A lost retirement response retains the UUID across tabs and reload. Even a
+  different sentence cannot generate until a lookup confirms the retirement.
+- An interrupted partial preview exposes confirmation directly. Cancelling
+  leaves the action reachable after returning home; accepting retains usable
+  home navigation and permits only a separate fresh request.
+
+These tests simulate terminal server states; they verify browser behavior, not
+database locking or the backend's retirement/save serialization. They do not
+exercise iPhone background suspension or a published-host timeout.
 
 ## Boundary
 

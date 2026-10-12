@@ -19,7 +19,13 @@ const test = base.extend({
     const recoveryRequests = [];
     let recoveryResult = { state: 'failed' };
     let recoveryLookups = 0;
+    let retirementResult = { state: 'retired' }, loseRetirement = false;
+    const manifestRequests = [], generations = [], held = [], holds = [];
     page.on('pageerror', e => errors.push(e.message));
+    context.on('page', tab => tab.on('pageerror', e => errors.push(e.message)));
+    await context.exposeBinding('__recordSyntheticGeneration', ({ page: tab }, request) => {
+      generations.push({ page: tab, ...request });
+    });
     // No request is allowed through to a backend or third-party service.
     await context.route('**/*', async route => {
       const url = new URL(route.request().url());
@@ -28,6 +34,24 @@ const test = base.extend({
         let body;
         if (url.pathname === '/api/ventures/browser-fixture') body = venture;
         else if (url.pathname.startsWith('/api/manifest/requests/')) {
+          const request = route.request();
+          const tab = request.frame().page();
+          const retirement = url.pathname.endsWith('/retire');
+          if (request.method() !== (retirement ? 'POST' : 'GET')) {
+            unexpected.push(`${request.method()} ${url.pathname}`);
+            return route.abort();
+          }
+          manifestRequests.push({ page: tab, method: request.method(), path: url.pathname });
+          const hold = holds.findIndex(item => item.page === tab && item.retirement === retirement);
+          if (hold !== -1) {
+            holds.splice(hold, 1);
+            held.push({ page: tab, retirement, route });
+            return;
+          }
+          if (retirement) {
+            if (loseRetirement) return route.abort('failed');
+            return route.fulfill({ json: retirementResult });
+          }
           recoveryLookups++;
           if (holdRecovery) { recoveryRequests.push(route); return; }
           body = recoveryResult;
@@ -110,6 +134,7 @@ const test = base.extend({
         });
         const request = { path, body: JSON.parse(options.body), aborted: false };
         window.__synthetic.requests.push(request);
+        window.__recordSyntheticGeneration({ path, body: request.body });
         if (path.endsWith('/refine')) {
           return new Promise((resolve, reject) => {
             let controller;
@@ -158,6 +183,19 @@ const test = base.extend({
       setRecoveryResult(result) { recoveryResult = result; },
       recoveryLookups: () => recoveryLookups,
       recoveryRequests: () => recoveryRequests.length,
+      manifestRequests,
+      generations,
+      setRetirementResult(result) { retirementResult = result; },
+      loseRetirementResponse() { loseRetirement = true; },
+      holdNextLookup(tab) { holds.push({ page: tab, retirement: false }); },
+      holdNextRetirement(tab) { holds.push({ page: tab, retirement: true }); },
+      heldRequests: () => held.length,
+      async releaseHeld(tab, data, retirement = false) {
+        const index = held.findIndex(item => item.page === tab && item.retirement === retirement);
+        if (index === -1) throw new Error('No matching held manifest response');
+        const [{ route }] = held.splice(index, 1);
+        await route.fulfill({ json: data });
+      },
       async resolveRecovery(data) {
         await recoveryRequests.at(-1).fulfill({ json: data });
         await expect.poll(() => page.evaluate(() => window.__synthetic.recoveryBodies)).toBe(1);
