@@ -56,3 +56,17 @@ Make the speculative status and limits of generated concepts conspicuous.
 **Why:** The creator said "let that be known so no lawsuits" about unproven comparative benefits.
 
 **How to apply:** Show clear notices where ideas are generated and read, not just buried in a footer. Distinguish concepts from tested products and sourced ingredients from proven hybrid performance. Do not promise lawsuit prevention or present notices as lawyer-reviewed legal protection.
+
+The creator wants the app to do as much as possible so people can approve or
+decline each step with Yes/No, rather than do all the work themselves. Their
+ambition is "the next standard for ideas and inventions," making everyday people
+rich and inventors and having big companies bid to build their ideas.
+
+**Why:** The creator explicitly said to remember this direction and objected to
+losing actionable steps.
+
+**How to apply:** Preserve useful actions and move toward approval-driven work,
+not just generated instructions or completion checkboxes. Treat wealth and
+company bidding as ambitions, not guaranteed outcomes. Distinguish work the app
+actually performs from drafts, external approvals, physical validation and
+company responses; a user's Yes alone is not evidence those occurred.
