@@ -61,6 +61,7 @@ The creator wants the app to do as much as possible so people can approve or
 decline each step with Yes/No, rather than do all the work themselves. Their
 ambition is "the next standard for ideas and inventions," making everyday people
 rich and inventors and having big companies bid to build their ideas.
+This applies to "Any step and alll steps," not just a few selected tasks.
 
 **Why:** The creator explicitly said to remember this direction and objected to
 losing actionable steps.
@@ -70,3 +71,16 @@ not just generated instructions or completion checkboxes. Treat wealth and
 company bidding as ambitions, not guaranteed outcomes. Distinguish work the app
 actually performs from drafts, external approvals, physical validation and
 company responses; a user's Yes alone is not evidence those occurred.
+
+Preparation outputs must remain distinct from completed real-world execution
+and private unless the creator explicitly authorizes sharing.
+
+**Why:** A draft RFQ, specialist review brief or pitch reduces work, but does not
+prove that a supplier was contacted, a design was reviewed, a product was built,
+or a company submitted a bid. Unreleased mechanisms should not leak through
+automation.
+
+**How to apply:** Keep existing manual actions, show actual outputs and remaining
+handoffs, and require specific approval before external messages, spending or
+sharing. Use snapshot/claim fencing when work overlaps notes, resets or another
+tab; never let a late result resurrect a reset path.

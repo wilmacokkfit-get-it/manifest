@@ -21,6 +21,7 @@ from pathlib import Path
 import anyio
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from app import step_assistance
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from app.plan_quality import PlanValidationError, require_valid_plan
@@ -93,7 +94,7 @@ from app.render_brief import render_brief
 from app.streaming import HeartbeatStreamingResponse, with_heartbeats
 from app.partial_json import parse_partial  # noqa: E402
 from app.provenance import mint, new_token, now_iso, unique_slug  # noqa: E402
-from app.store import RENDER_LEASE_SECONDS, build_store, day_start_iso, hours_ago_iso, lease_expired  # noqa: E402
+from app.store import RENDER_LEASE_SECONDS, build_store, day_start_iso, hours_ago_iso, lease_expired, lease_until  # noqa: E402
 from app.owner_auth import app_owner_token, is_app_owner, router as owner_auth_router  # noqa: E402
 from app.wait_probe import router as wait_probe_router
 
@@ -330,7 +331,14 @@ def _path_view(path: dict | None, is_owner: bool) -> dict | None:
         "steps": steps, "done": done, "total": len(steps),
     }
     if not is_owner:
-        out["steps"] = [{k: v for k, v in st.items() if k != "note"} for st in steps]
+        out["steps"] = [{k: v for k, v in st.items() if k not in ("note", "automation")} for st in steps]
+    else:
+        out["steps"] = [dict(st) for st in steps]
+        for st in out["steps"]:
+            automation = st.get("automation") or {}
+            if automation.get("state") == "running" and not step_assistance.running(automation):
+                st["automation"] = {**automation, "state": "failed",
+                                    "error": "The preparation wait expired. You can explicitly retry."}
     return out
 
 
@@ -1011,6 +1019,9 @@ async def choose_path(slug: str, body: PathBody, request: Request):
             require_valid_plan(obj, str(v.get("idea_raw") or "") + " " + str(v.get("description") or ""), path=True)
             path = _normalize_path(obj, tier, tier_label)
             require_valid_plan(path, str(v.get("idea_raw") or "") + " " + str(v.get("description") or ""), path=True)
+            # A new path must differ from every older work snapshot even when
+            # regenerated in the same second with the same step text.
+            path["_revision"] = uuid.uuid4().hex
             saved = await store.finish_path(v["id"], path, claim_id)
             if not saved:
                 raise RuntimeError("The path claim could not be completed.")
@@ -1046,20 +1057,115 @@ async def update_step(slug: str, n: int, body: StepBody, request: Request):
     v, is_owner = await _load(slug, request)
     if not is_owner:
         raise HTTPException(403, "Only the creator can update the path.")
-    path = v.get("path") or {}
-    steps = path.get("steps") or []
-    step = next((st for st in steps if st.get("n") == n), None)
-    if not step:
-        raise HTTPException(404, "No such step.")
-    if body.status is not None:
-        if body.status not in ("todo", "doing", "done"):
-            raise HTTPException(400, "Status must be todo, doing, or done.")
-        step["status"] = body.status
-        step["done_at"] = now_iso() if body.status == "done" else None
-    if body.note is not None:
-        step["note"] = body.note.strip()[:1500]
-    saved = await store.update_venture(v["id"], {"path": path})
+    if body.status is not None and body.status not in ("todo", "doing", "done"):
+        raise HTTPException(400, "Status must be todo, doing, or done.")
+    def change(step):
+        if body.status is not None:
+            step["status"] = body.status
+            step["done_at"] = now_iso() if body.status == "done" else None
+        if body.note is not None:
+            step["note"] = body.note.strip()[:1500]
+    saved = await step_assistance.edit_step(store, v["id"], n, change)
     return await _full_view(saved, True, request)
+
+
+class StepApprovalBody(BaseModel):
+    approve: bool
+
+
+@app.post("/api/ventures/{slug}/path/steps/{n}/assist")
+async def assist_step(slug: str, n: int, body: StepApprovalBody, request: Request):
+    v, is_owner = await _load(slug, request)
+    if not is_owner:
+        raise HTTPException(403, "Only the creator can approve work on this step.")
+    unlimited = body.approve and await is_app_owner(request)
+    worker_store = store
+    claim_id = uuid.uuid4().hex
+    work = {}
+    # Permanent bounded attempts per step prevent a failed/aborted request from
+    # becoming an unlimited provider-call loop. Cached work costs no new call.
+    def claim(step):
+        work.clear()  # A CAS retry can discover work another tab just finished.
+        previous = step.get("automation") or {}
+        if step_assistance.running(previous):
+            raise HTTPException(409, "This step is already being prepared. Refresh to check its result.")
+        if not body.approve:
+            step["automation"] = {**previous, "state": "declined"}
+        elif previous.get("result"):
+            step["automation"] = {**previous, "state": "ready"}
+        else:
+            attempts = int(previous.get("attempts") or 0)
+            if attempts >= 3 and not unlimited:
+                raise HTTPException(429, "This step reached its three preparation attempts. Your manual actions are still available.")
+            step["automation"] = {
+                "state": "running", "claim_id": claim_id, "attempts": attempts + 1,
+                "lease_until": lease_until(), "started_at": now_iso(),
+            }
+            work["step"] = dict(step)
+    if not body.approve:
+        claimed = await _shielded_bounded_call(step_assistance.edit_step(worker_store, v["id"], n, claim))
+        return await _full_view(claimed, True, request)
+
+    async def finish(state, result=None, error=None):
+        def change(step):
+            previous = step.get("automation") or {}
+            if previous.get("claim_id") != claim_id or previous.get("state") != "running":
+                raise HTTPException(409, "This preparation no longer owns the step.")
+            step["automation"] = {
+                "state": state, "attempts": previous["attempts"],
+                "started_at": previous["started_at"], "finished_at": now_iso(),
+                **({"result": result} if result is not None else {}),
+                **({"error": error} if error else {}),
+            }
+        return await _shielded_bounded_call(
+            step_assistance.edit_step(worker_store, v["id"], n, change)
+        )
+
+    async def gen():
+        saved = False
+        message = "Preparation stopped before completion. Nothing was marked done."
+        try:
+            # Claim inside the generator so disconnect cleanup also covers a
+            # cancellation during admission, before the first SSE event.
+            claimed = await _shielded_bounded_call(step_assistance.edit_step(worker_store, v["id"], n, claim))
+            if "step" not in work:
+                saved = True
+                yield _sse("done", await _full_view(claimed, True, request))
+                return
+            yield _sse("meta", {"step_n": n})
+            yield _sse("status", {"message": "Preparing this step's drafts and handoff. No outside actions will be taken."})
+            with anyio.fail_after(TEXT_TIMEOUT_SECONDS):
+                text = ""
+                async for chunk in llm.stream_step_work(claimed, work["step"]):
+                    text += chunk
+                    if len(text) > 65000:
+                        raise ValueError("The preparation was too large.")
+                result = step_assistance.packet(text)
+            fresh = await finish("ready", result=result)
+            saved = True
+            yield _sse("done", await _full_view(fresh, True, request))
+        except (Exception, asyncio.CancelledError) as e:
+            if isinstance(e, TimeoutError):
+                message = "Preparation reached its two-minute limit. Nothing was marked done."
+            elif isinstance(e, ValueError):
+                message = str(e)
+            elif isinstance(e, HTTPException):
+                message = str(e.detail)
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            try:
+                await finish("failed", error=message)
+            except HTTPException:
+                pass  # A reset/deletion/replacement must never be overwritten.
+            yield _sse("error", {"code": "step_preparation_failed", "message": message})
+        finally:
+            if not saved:
+                try:
+                    await finish("failed", error=message)
+                except Exception:
+                    pass  # Bounded cleanup cannot resurrect a deleted/reset path.
+    return HeartbeatStreamingResponse(with_heartbeats(gen()), media_type="text/event-stream",
+                                      headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.delete("/api/ventures/{slug}/path")

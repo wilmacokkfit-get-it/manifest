@@ -591,6 +591,33 @@
     try { return { event, data: JSON.parse(data) }; } catch (_) { return null; }
   }
 
+  async function* events(response, signal) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        signal?.throwIfAborted();
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        let boundary;
+        while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+          const block = buffer.slice(0, boundary).replace(/\r/g, '');
+          buffer = buffer.slice(boundary + 2);
+          const parsed = parseSSE(block);
+          if (parsed) yield parsed;
+        }
+        if (done) {
+          const parsed = parseSSE(buffer.replace(/\r/g, ''));
+          if (parsed) yield parsed;
+          return;
+        }
+      }
+    } finally {
+      try { await reader.cancel(); } catch (_) {}
+    }
+  }
+
   // ---------- venture view ----------
   function VentureView({ slug, live }) {
     const root = h('section', { class: 'view venture' });
@@ -990,6 +1017,8 @@
     const gsearch = (q) => 'https://www.google.com/search?q=' + encodeURIComponent(q);
     const vpath = (v, rest) => `/api/ventures/${encodeURIComponent(v.slug)}${rest}`;
     let pathStreaming = false;
+    let stepAssistBusy = false;
+    const stepAssistMessages = new Map();
 
     function renderTierPicks(v) {
       root.querySelector('.pick-hint')?.remove();
@@ -1130,6 +1159,153 @@
       }
       (v.needs || []).filter(n => n.step_n === st.n).forEach(n => body.append(needEl(v, n)));
       if (own) {
+        const assist = h('section', { class: 'step-assist', 'aria-label': `AI preparation for step ${st.n}` });
+        const paintAssist = (automation) => {
+          const state = automation?.state || 'unasked';
+          const notice = stepAssistMessages.get(st.n);
+          assist.replaceChildren(
+            h('div', { class: 'step-assist-head' },
+              h('span', { class: 'step-assist-kicker', text: 'Optional AI preparation' }),
+              h('span', { class: `step-assist-state ${state}`, text: ({
+                unasked: 'awaiting your choice', running: 'preparing', ready: 'drafts ready',
+                failed: 'preparation failed', declined: 'declined',
+              })[state] || 'available' })),
+            h('p', { class: 'step-assist-note', text: notice || (state === 'running'
+              ? 'Preparation is still running on the server. Refresh to recover its status; it will not be submitted again automatically.'
+              : 'Approve preparation only. Nothing will be sent, bought, tested, or built. Review every draft and complete qualified safety review yourself.') }));
+          if (state === 'unasked') {
+            const controls = h('div', { class: 'step-assist-actions' },
+              h('button', { class: 'btn small primary', type: 'button', text: 'Yes — prepare drafts', disabled: stepAssistBusy, onclick: () => requestAssistance(true) }),
+              h('button', { class: 'btn small ghost', type: 'button', text: 'No — decline AI help', disabled: stepAssistBusy, onclick: () => requestAssistance(false) }));
+            assist.append(controls);
+          } else if (state === 'failed') {
+            assist.append(h('div', { class: 'step-assist-actions' },
+              h('button', { class: 'btn small primary', type: 'button', text: 'Retry preparation', disabled: stepAssistBusy, onclick: () => requestAssistance(true) })));
+            if (automation.error) assist.append(h('p', { class: 'step-assist-error', text: automation.error }));
+          } else if (state === 'declined') {
+            assist.append(h('p', { class: 'step-assist-footnote', text: 'Declining AI help does not waive or replace any required safety review.' }));
+            assist.append(h('button', { class: 'btn small ghost', type: 'button', text: 'Yes — prepare drafts', disabled: stepAssistBusy, onclick: () => requestAssistance(true) }));
+          } else if (state === 'ready' && automation.result) {
+            const result = automation.result;
+            if (result.summary) assist.append(h('p', { class: 'step-assist-summary', text: result.summary }));
+            (result.deliverables || []).forEach((item, index) => {
+              const content = String(item.content || '');
+              const title = String(item.title || `Preparation draft ${index + 1}`);
+              const card = h('article', { class: 'step-deliverable' },
+                h('div', { class: 'step-deliverable-head' },
+                  h('h4', { text: title }),
+                  h('div', { class: 'step-deliverable-actions' },
+                    h('button', { class: 'btn small ghost', type: 'button', text: 'Copy text', onclick: async () => {
+                      try {
+                        await navigator.clipboard.writeText(content);
+                        toast('Prepared text copied.');
+                      } catch (_) { toast('Copy is unavailable here. Select the draft text to copy it.'); }
+                    } }),
+                    h('button', { class: 'btn small ghost', type: 'button', text: 'Download', onclick: () => {
+                      const file = new Blob([content], { type: 'text/plain;charset=utf-8' });
+                      const url = URL.createObjectURL(file);
+                      const link = h('a', { href: url, download: `step-${st.n}-draft-${index + 1}.txt` });
+                      document.body.append(link); link.click(); link.remove();
+                      setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    } }))),
+                h('pre', { class: 'step-deliverable-content', text: content }));
+              assist.append(card);
+            });
+            if (result.human_handoff?.length) assist.append(h('div', { class: 'step-assist-list' },
+              h('h4', { text: 'A person still needs to' }),
+              h('ul', {}, ...result.human_handoff.map(item => h('li', { text: item })))));
+            if (result.limitations?.length) assist.append(h('div', { class: 'step-assist-list limitations' },
+              h('h4', { text: 'Limitations to keep in view' }),
+              h('ul', {}, ...result.limitations.map(item => h('li', { text: item })))));
+            assist.append(h('p', { class: 'step-assist-footnote', text: 'Preparation only. These are drafts, not completed actions or verified research. Review claims and safety with qualified people before acting.' }));
+          }
+        };
+        const requestAssistance = async (approve) => {
+          if (stepAssistBusy) return;
+          stepAssistBusy = true;
+          root.querySelectorAll('.step-assist-actions button').forEach(button => { button.disabled = true; });
+          stepAssistMessages.delete(st.n);
+          paintAssist({ state: 'running' });
+          let wait;
+          wait = generationWait('step', text => {
+            const note = assist.querySelector('.step-assist-note');
+            if (note && !wait?.cancelled) note.textContent = `${text} Preparation only; nothing is sent or carried out.`;
+          });
+          wait.stage('Preparing this step');
+          let receivedResult = false;
+          try {
+            const response = await fetch(API + vpath(v, `/path/steps/${st.n}/assist`), {
+              method: 'POST', credentials: 'same-origin', signal: wait.signal,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ approve }),
+            });
+            if (!response.ok) {
+              const problem = await response.json().catch(() => ({}));
+              throw new Error(problem.error || problem.message || 'The preparation request could not be completed.');
+            }
+            const type = response.headers.get('content-type') || '';
+            if (type.includes('application/json')) {
+              const fresh = await response.json();
+              if (wait.cancelled) return;
+              receivedResult = true;
+              wait.finish();
+              stepAssistMessages.delete(st.n);
+              complete(fresh);
+              toast(approve ? 'Preparation saved. Review every draft before acting.' : 'AI assistance declined. Safety review is still required.');
+              return;
+            }
+            if (!response.body) throw new Error('The preparation stream was empty. Refresh to check its saved state.');
+            let gotDone = false, metaStep = null;
+            for await (const ev of events(response, wait.signal)) {
+              if (wait.cancelled) return;
+              if (ev.event === 'meta') metaStep = ev.data.step_n;
+              else if (ev.event === 'status') {
+                const note = assist.querySelector('.step-assist-note');
+                if (note) note.textContent = `${ev.data.message || 'Preparing the step…'} This creates drafts only; no external action is taken.`;
+              } else if (ev.event === 'done') {
+                if (metaStep != null && Number(metaStep) !== Number(st.n)) throw new Error('The stream returned a different step. Refresh to inspect the saved result.');
+                gotDone = true;
+                receivedResult = true;
+                wait.finish();
+                stepAssistMessages.delete(st.n);
+                complete(ev.data);
+                toast('Preparation saved. Review every draft before acting.');
+              } else if (ev.event === 'error') {
+                const error = new Error(ev.data.message || 'The preparation failed.');
+                error.code = ev.data.code;
+                throw error;
+              }
+            }
+            if (!gotDone) throw new Error('The stream ended before the prepared result arrived. Refresh to recover its saved state; it was not resubmitted.');
+          } catch (error) {
+            if (wait.cancelled) return;
+            wait.finish('failed');
+            let message = error.name === 'AbortError'
+              ? 'Connection interrupted. Refresh to check the saved state; preparation is never resubmitted automatically.'
+              : `${error.message} Refresh to check the saved state before choosing whether to retry.`;
+            if (error.code) message = `${error.message} Refresh to check the saved state before choosing whether to retry.`;
+            try {
+              const fresh = await api(vpath(v, ''), { signal: wait.signal });
+              if (wait.cancelled) return;
+              stepAssistMessages.set(st.n, message);
+              complete(fresh);
+            } catch (_) {
+              if (wait.cancelled) return;
+              stepAssistMessages.set(st.n, message);
+              paintAssist(st.automation);
+            }
+            toast(message);
+          } finally {
+            wait.finish(receivedResult ? 'completed' : 'interrupted');
+            wait.dispose();
+            stepAssistBusy = false;
+            if (venture && !wait.cancelled) renderPath(venture);
+          }
+        };
+        if (own) {
+          paintAssist(st.automation);
+          body.append(assist);
+        }
         const ctl = h('div', { class: 'pstep-ctl' });
         const set = async (status) => {
           try { complete(await api(vpath(v, `/path/steps/${st.n}`), { method: 'PATCH', body: JSON.stringify({ status }) })); if (status === 'done') toast(`Step ${st.n} done.`); }

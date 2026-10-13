@@ -473,6 +473,17 @@ class SQLiteStore(RenderAccess):
             self._db.commit()
         return await self.get_by_id(venture_id)
 
+    async def compare_path(self, venture_id: str, original: dict, path: dict) -> dict | None:
+        path = {**path, "_revision": _new_id()}
+        with self._lock:
+            cur = self._db.execute(
+                """UPDATE ventures SET path = ?, updated_at = ? WHERE id = ?
+                   AND path IS NOT NULL AND json_extract(path, '$._revision') IS ?""",
+                [json.dumps(path), now_iso(), venture_id, original.get("_revision")],
+            )
+            self._db.commit()
+        return await self.get_by_id(venture_id) if cur.rowcount else None
+
     async def _compare_venture(self, current: dict, fields: dict) -> dict | None:
         fields = {**fields, "updated_at": now_iso()}
         enc = self._encode(fields)
@@ -1038,6 +1049,17 @@ class SupabaseStore(RenderAccess):
         fields["updated_at"] = now_iso()
         data = await self._rest("PATCH", "ventures", params={"id": f"eq.{venture_id}"}, json_body=fields,
                                 prefer="return=representation")
+        return data[0] if data else None
+
+    async def compare_path(self, venture_id: str, original: dict, path: dict) -> dict | None:
+        revision = original.get("_revision")
+        path = {**path, "_revision": _new_id()}
+        data = await self._rest(
+            "PATCH", "ventures",
+            params={"id": f"eq.{venture_id}", "path": "not.is.null",
+                    "path->>_revision": f"eq.{revision}" if revision else "is.null"},
+            json_body={"path": path, "updated_at": now_iso()}, prefer="return=representation",
+        )
         return data[0] if data else None
 
     @staticmethod
