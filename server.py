@@ -440,6 +440,23 @@ def _sse(event: str, data) -> str:
 TEXT_TIMEOUT_SECONDS = 120
 
 
+def _validated_manifest_plan(draft: dict, idea: str) -> dict:
+    """Give the one correction pass every finding, including truncation effects."""
+    findings = []
+    try:
+        require_valid_plan(draft, idea)
+    except PlanValidationError as rejected:
+        findings.extend(rejected.findings)
+    normalized = _normalize(draft)
+    try:
+        require_valid_plan(normalized, idea)
+    except PlanValidationError as rejected:
+        findings.extend(rejected.findings)
+    if findings:
+        raise PlanValidationError(list(dict.fromkeys(findings)))
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Generation
 # ---------------------------------------------------------------------------
@@ -584,9 +601,7 @@ async def manifest(body: ManifestBody, request: Request):
                 if not isinstance(obj, dict) or not obj.get("name"):
                     raise RuntimeError("The engine returned nothing usable.")
                 try:
-                    require_valid_plan(obj, idea)
-                    data = _normalize(obj)
-                    require_valid_plan(data, idea)
+                    data = _validated_manifest_plan(obj, idea)
                 except PlanValidationError as rejected:
                     correction_started = True
                     original_name = obj.get("name")
@@ -608,10 +623,8 @@ async def manifest(body: ManifestBody, request: Request):
                     # claims, including the name, still face the checks below.
                     if isinstance(original_name, str):
                         obj["name"] = original_name
-                    require_valid_plan(obj, idea)
-                    data = _normalize(obj)
-                    require_valid_plan(data, idea)
-                    yield _sse("partial", {"data": obj, "streaming": None, "replace": True})
+                    data = _validated_manifest_plan(obj, idea)
+                    yield _sse("partial", {"data": data, "streaming": None, "replace": True})
             slug = await asyncio.to_thread(unique_slug, data["name"], store.slug_exists)
             row = {
                 "id": venture_id,

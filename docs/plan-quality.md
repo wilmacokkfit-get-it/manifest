@@ -70,12 +70,33 @@ ventures, refinements or paths. Initial/path JSON must finish parsing, not merel
 look usable as a partial stream. Findings do not add fields to streamed JSON.
 
 Streaming partials remain provisional, unchecked drafts; a failure emits the
-existing error event and never a successful `done`. There is no silent rewrite
-or automatic paid correction call. The user can retry; failed initial generation
-releases pending durable admission. Refinement retains its existing
-charge-on-start policy, preserves the original result and clears its scoped
-claim. Failed paths release their scoped claim without replacing the old path.
-Privacy, ownership and admission rules are unchanged.
+existing error event and never a successful `done`.
+
+For initial Manifest generation, a factual/safety rejection triggers **one**
+automatic text correction, using all findings from the raw and normalized
+draft. It preserves the original sentence, draft name, inventive mechanism and
+selected Mix context. This is another provider call, but not another submission,
+venture allowance or use of the visitor's optional context refinement. Both
+text calls share the original two-minute generation deadline, request identity,
+venture ID and provenance. The browser shows “Refining your draft” and hides
+rejected build instructions while waiting. Only a complete correction passing
+both checks replaces the preview, using the normalized content that will be saved.
+
+If correction fails, times out, returns incomplete JSON or remains rejected,
+no venture is saved. The server records known pre-save failure and releases
+pending admission **before** emitting the error. An ambiguous save still uses
+the original recovery lookup; neither server nor browser starts a replacement
+request or silently downgrades tracking.
+
+Refinements and paths do not get this automatic correction pass. Refinement
+retains its existing charge-on-start policy, preserves the original result and
+clears its scoped claim. Failed paths release their scoped claim without
+replacing the old path. Privacy, ownership and admission rules are unchanged.
+
+Provider-free correction regressions:
+`python -m unittest discover -s tests -p 'test_manifest_correction.py' -v`.
+Browser progress, hidden rejected steps and replacement checks are in
+`tests/browser/generation.spec.cjs`.
 
 This is a conservative lexical blocklist with known false positives and false
 negatives, not engineering review or a model safety guarantee. It cannot verify

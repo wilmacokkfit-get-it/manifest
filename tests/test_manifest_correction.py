@@ -177,6 +177,104 @@ class ManifestCorrectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('"replace": true', response.text)
         self.assertEqual(self.counts(), (0, 0, 0))
 
+    async def test_correction_receives_all_raw_and_normalized_findings(self):
+        normalizer = server._normalize
+        captured = []
+        def normalize(plan):
+            normalized = normalizer(plan)
+            if "fully compliant" in plan["description"]:
+                normalized["tagline"] = "Guaranteed success."
+            return normalized
+        async def correct(idea, draft, findings, **kwargs):
+            captured.append(findings)
+            yield json.dumps(refined_output())
+        with patch.object(llm, "stream_venture_text", self.bad_output), patch.object(
+            llm, "stream_venture_correction_text", correct
+        ), patch.object(server, "_normalize", normalize):
+            response = await self.client.post("/api/manifest", json=self.body)
+        self.assertEqual(captured, [["unsupported_certification", "unsupported_guarantee"]])
+        self.assertIn("event: done", response.text)
+        self.assertEqual(self.counts(), (1, 1, 0))
+
+    async def test_food_contact_correction_keeps_mechanism_and_gates_functional_testing(self):
+        idea = "A passive drip irrigation kit using rail indexing; no electronics."
+        bad = deepcopy(refined_output())
+        bad["description"] = (
+            "A passive food-contact drip irrigation kit uses rail indexing to position "
+            "reusable tubing. Easier positioning is a hypothesis, not proven evidence."
+        )
+        bad["tiers"][0]["description"] = "Build and test the food-contact tubing."
+        bad["roadmap"] = [
+            {"action": "Test the functional irrigation kit.", "where": "Greenhouse."},
+            {"action": "Request review with a qualified materials specialist.", "where": "Review food-contact materials."},
+        ]
+        fixed = deepcopy(bad)
+        fixed["tiers"][0]["description"] = (
+            "Interview customers with a nonfunctional paper mockup. Qualified materials "
+            "review is required before functional construction or testing."
+        )
+        fixed["roadmap"] = [
+            {"action": "Review a nonfunctional concept with a qualified materials specialist.",
+             "where": "Use a paper sketch and interviews; proposed pass criterion: 3 of 5 growers "
+                      "prefer rail indexing. Revise the positioning mechanism if it fails."},
+            {"action": "After the earlier qualified review, commission professional validation.",
+             "where": "A qualified specialist must approve food-contact materials before testing the kit."},
+        ]
+        async def initial(*args, **kwargs):
+            yield json.dumps(bad)
+        async def correct(sentence, draft, findings, **kwargs):
+            self.assertEqual(sentence, idea)
+            self.assertEqual(draft, bad)
+            self.assertIn("review_after_functional_work", findings)
+            self.assertIn("ungated_functional_lean_build", findings)
+            yield json.dumps(fixed)
+        with patch.object(llm, "stream_venture_text", initial), patch.object(
+            llm, "stream_venture_correction_text", correct
+        ):
+            response = await self.client.post("/api/manifest", json={**self.body, "idea": idea})
+        self.assertIn("event: done", response.text)
+        saved = (await self.lookup()).json()["venture"]
+        self.assertEqual(saved["description"], fixed["description"])
+        self.assertEqual(saved["roadmap"], server._normalize(fixed)["roadmap"])
+        self.assertEqual(blocking_findings(saved, idea), [])
+        self.assertEqual(self.counts(), (1, 1, 0))
+
+    async def test_failed_correction_is_recorded_before_emitting_error(self):
+        original_sse = server._sse
+        errors = []
+        def emit(event, data):
+            if event == "error":
+                failed = self.store._db.execute(
+                    "SELECT failed FROM manifest_requests WHERE request_id = ?",
+                    (self.request_id,),
+                ).fetchone()[0]
+                self.assertEqual(failed, 1)
+                self.assertEqual(self.counts(), (0, 0, 0))
+                errors.append(data["code"])
+            return original_sse(event, data)
+        with patch.object(llm, "stream_venture_text", self.bad_output), patch.object(
+            llm, "stream_venture_correction_text", self.bad_output
+        ), patch.object(server, "_sse", emit):
+            await self.client.post("/api/manifest", json=self.body)
+        self.assertEqual(errors, ["draft_rejected"])
+
+    async def test_lost_corrected_save_response_recovers_without_second_venture_or_refund(self):
+        save = self.store.create_reserved_venture
+        async def ambiguous_save(token, row):
+            await save(token, row)
+            raise RuntimeError("Synthetic lost save response")
+        with patch.object(llm, "stream_venture_text", self.bad_output), patch.object(
+            llm, "stream_venture_correction_text", self.output
+        ), patch.object(self.store, "create_reserved_venture", ambiguous_save):
+            response = await self.client.post("/api/manifest", json=self.body)
+        self.assertIn("event: error", response.text)
+        self.assertEqual((await self.lookup()).json()["state"], "completed")
+        self.assertEqual(self.counts(), (1, 1, 0))
+        with patch.object(llm, "stream_venture_text", side_effect=AssertionError("No second generation")):
+            replay = await self.client.post("/api/manifest", json=self.body)
+        self.assertEqual(replay.json()["state"], "completed")
+        self.assertEqual(self.counts(), (1, 1, 0))
+
     async def test_unlimited_creator_still_uses_one_durable_request_identity(self):
         with patch.object(server, "is_app_owner", return_value=True), patch.object(
             llm, "stream_venture_text", self.bad_output

@@ -46,6 +46,8 @@ not a new submission or the visitor's optional context refinement.
 **Why:** Asking creators to retry rejected AI drafts leaves the generator's own
 mistakes with the user. Re-admitting work or resetting deadlines risks duplicate
 ventures, extra allowances, and workers outliving their recovery leases.
+Normalization may reveal different rejected claims from the raw draft; with
+only one correction opportunity, both sets of reasons must reach the model.
 
 **How to apply:** Preserve the request identity, name, provenance, selected Mix
 mechanisms and allowance. Share the initial text deadline, validate raw and
