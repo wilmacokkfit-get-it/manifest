@@ -145,6 +145,12 @@ exercise iPhone background suspension or a published-host timeout.
 
 ## Boundary
 
+For real iPhone app switching, use the separate disposable
+[Safari device check](ios-waiting-device-check.md). It reuses the synthetic
+runtime with real clocks and memory-only storage. A physical iPhone, exact iOS
+version and reviewed foreground/background evidence are required; the automated
+device-harness smoke tests are not that sign-off.
+
 These are browser integration checks, not a hosting proxy experiment. They do
 not establish the published host's idle timeout or behavior when real upstream
 connections disconnect. A future production check must read the deployment

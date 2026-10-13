@@ -20,6 +20,32 @@ Use a secure synthetic origin
 because request identity creation depends on secure-context crypto APIs.
 Synthetic browser checks do not verify a hosting proxy's idle behavior.
 
+Physical Safari sign-off requires observations from a real iPhone and its exact
+iOS version. Keep device checks on a dedicated HTTPS origin, with memory-only
+app storage and fail-closed provider networking.
+
+**Why:** Mobile WebKit emulation cannot establish iOS suspension behavior. LAN
+HTTP does not supply secure-context request identities, and an existing origin's
+service worker can intercept a fixture before its in-page safeguards load.
+
+**How to apply:** Record both wall and performance elapsed time and genuine
+visibility transitions, then review watchdog/retry and post-navigation state.
+Never label automated harness results or unreviewed exports as physical-device
+verification, and never interpret in-browser synthetic streams as host-timeout
+measurements.
+
+For phone-only device-check handoffs, provide a working HTTPS link that opens
+in external Safari rather than requiring desktop terminal setup. Any temporary
+replacement of the development preview needs approval and subsequent restoration.
+
+**Why:** A user working from the iOS Replit app could not use the original
+computer-based fixture instructions; an approved temporary synthetic preview
+enabled the real Safari checks without deploying or using providers.
+
+**How to apply:** Keep provider access and durable storage blocked. Separate
+user-reported manual outcomes from exported measurements in the evidence summary;
+a brief success confirmation must not become invented timer or abort data.
+
 Treat retirement confirmation as user consent, not as a cross-tab lock. A
 terminal response for an old identity does not authorize replacing newer work
 started in another tab.

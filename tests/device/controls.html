@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Isolated Safari waiting check</title>
+<style>
+body { font: 16px system-ui; margin: 12px; background: #f3f4f6; color: #151a21 }
+label { display: block; margin: 8px 0 }
+button, input, select, textarea { font: inherit; padding: 8px; max-width: 100%; box-sizing: border-box }
+button { margin: 4px 2px }
+iframe { display: block; width: 100%; height: 664px; border: 1px solid #677 }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px }
+#error { color: #a00 }
+</style>
+<h1>Safari waiting check</h1>
+<p>Synthetic only. Real clocks; memory-only storage. No providers or saved ventures.
+This does not measure a published host’s timeout.</p>
+<label>Exact iOS version (Settings → General → About) <input id="ios" placeholder="e.g. 18.6.2"></label>
+<label>iPhone model <input id="model" placeholder="e.g. iPhone 13"></label>
+<label><input type="checkbox" id="physical"> I am using Safari on a physical iPhone, not emulation.</label>
+<label>Operation <select id="operation"><option>venture</option><option>path</option><option>refinement</option></select></label>
+<label>Case <select id="scenario">
+<option value="elapsed-before">Elapsed before text (background 45–60 seconds)</option>
+<option value="elapsed-after">Elapsed after partial text (background 45–60 seconds)</option>
+<option value="timeout">Watchdog then retry (background over 4 minutes)</option>
+<option value="body-timeout">Stalled JSON body then retry (refinement only; over 4 minutes)</option>
+<option value="navigate-before">Navigation before text after returning</option>
+<option value="navigate-after">Navigation after partial text after returning</option>
+</select></label>
+<button id="start">Start fresh case</button>
+<button id="retry">Retry and complete</button>
+<button id="complete">Complete current response</button>
+<button id="navigate">Navigate to About</button>
+<button id="snapshot">Record snapshot</button>
+<p>After starting, switch to another app (do not just hide a panel). Return to Safari.
+Wait two seconds, record a snapshot, then complete, retry, or navigate as the case requires.
+Navigation cases: switch apps once more after navigating and confirm About stays open.</p>
+<label>Observed result / issues <textarea id="notes" rows="2"></textarea></label>
+<button id="export">Export observation JSON</button>
+<p id="error" role="alert"></p>
+<pre id="summary">No case started. The report is observations, not an automatic physical-device pass.</pre>
+<iframe id="app" title="Actual application with synthetic responses" sandbox="allow-scripts allow-same-origin allow-forms" src="/app.html"></iframe>
+<!--CONTROLLER-->
+</html>
