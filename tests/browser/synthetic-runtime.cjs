@@ -72,7 +72,10 @@ function installSyntheticRuntime() {
       cancel() { ended = true; },
     });
     const encoder = new TextEncoder();
-    request.send = (event, data) => streamController.enqueue(
+    // Accept already-encoded bytes so tests can cut inside a UTF-8 code point.
+    // Encoding each text fragment separately would corrupt the fixture itself.
+    request.bytes = bytes => streamController.enqueue(Uint8Array.from(bytes));
+    request.send = (event, data) => request.bytes(
       encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
     request.close = () => { if (!ended) { ended = true; streamController.close(); } };
     request.json = value => {

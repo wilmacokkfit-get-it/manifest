@@ -1,4 +1,4 @@
-const { test, expect } = require('./generation.fixture.cjs');
+const { test, expect, sseFrame } = require('./generation.fixture.cjs');
 
 test('pending recovery: one visible lookup and Manifest checks instead of silently ignoring clicks', async ({ page, harness }) => {
   test.setTimeout(60000);
@@ -74,6 +74,168 @@ const retry = (page, operation) => operation === 'path' ?
 const partial = operation => operation === 'venture' ?
   { data: { name: 'Synthetic venture', tagline: 'Partial text' }, streaming: 'tagline' } :
   { data: { first_move: 'Synthetic first step' }, streaming: 'first_move' };
+
+const unicodeText = 'Café 水 🌱 — "quoted" \\ trail';
+const unicodePartial = (operation, text = unicodeText) => operation === 'venture' ?
+  { data: { name: 'Synthetic venture', tagline: text }, streaming: 'tagline' } :
+  { data: { first_move: text }, streaming: 'first_move' };
+const streamText = (page, operation) => page.locator(operation === 'venture' ?
+  '.v-tagline' : '.first-move span');
+const streamFinal = (harness, operation) => operation === 'venture' ?
+  { ...harness.venture, tagline: unicodeText } :
+  { ...harness.venture, path: { tier: 0, tier_label: 'Bootstrap', first_move: unicodeText,
+    steps: [{ n: 1, title: 'Synthetic step', status: 'todo' }] } };
+
+async function retryStream(page, harness, operation) {
+  if (operation === 'venture') {
+    await page.getByRole('link', { name: 'Return to your ventures' }).click();
+    await page.clock.runFor(1000);
+    await page.getByRole('button', { name: 'Manifest it' }).click();
+  } else await retry(page, operation).click();
+  await expect.poll(() => page.evaluate(() => window.__synthetic.requests.length)).toBe(2);
+  await page.clock.runFor(2000);
+  await harness.sendChunks(sseFrame('partial', unicodePartial(operation)), [1, 7, 2, 13]);
+  await expect(streamText(page, operation)).toHaveText(unicodeText);
+  await page.clock.runFor(3000);
+  await harness.sendChunks(sseFrame('done', streamFinal(harness, operation)), [3, 1, 11, 2]);
+  await harness.close();
+  await expect(streamText(page, operation)).toHaveText(unicodeText);
+  await expect(page.locator('.v-name')).toHaveText(harness.venture.name);
+  await expect.poll(() => harness.measures(operation)).toContainEqual({
+    name: `manifest.${operation}.completed`, duration: 5000,
+  });
+  expect((await harness.measures(operation)).filter(e => e.name.endsWith('.first-visible-text')))
+    .toEqual([
+      { name: `manifest.${operation}.first-visible-text`, duration: 0 },
+      { name: `manifest.${operation}.first-visible-text`, duration: 2000 },
+    ]);
+  expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
+}
+
+for (const operation of ['venture', 'path']) {
+  test(`${operation}: byte boundaries gate JSON, Unicode and the SSE delimiter`, async ({ page, harness }) => {
+    await harness.start(operation);
+    const bytes = Buffer.from(sseFrame('partial', unicodePartial(operation)), 'utf8');
+    // Hold after an incomplete JSON key, then inside 2-, 3- and 4-byte code points,
+    // then between the delimiter's newlines. Nothing should paint prematurely.
+    const cuts = [
+      bytes.indexOf(Buffer.from('"data"')) + 3,
+      ...['é', '水', '🌱'].map(char => bytes.indexOf(Buffer.from(char)) + 1),
+      bytes.length - 1,
+    ];
+    let offset = 0;
+    for (const cut of cuts) {
+      await harness.sendBytes(bytes.subarray(offset, cut));
+      offset = cut;
+      await page.clock.runFor(1000);
+      await expect(status(page, operation)).toContainText('Considering your idea');
+      expect(await harness.measures(operation)).toEqual([]);
+      await expect(streamText(page, operation)).toHaveCount(0);
+    }
+    await harness.sendBytes(bytes.subarray(offset));
+    await expect(streamText(page, operation)).toHaveText(unicodeText);
+    expect(await harness.measures(operation)).toEqual([
+      { name: `manifest.${operation}.first-visible-text`, duration: 5000 },
+    ]);
+    await page.clock.runFor(2000);
+    const done = Buffer.from(sseFrame('done', streamFinal(harness, operation)));
+    await harness.sendBytes(done.subarray(0, -1));
+    expect(await harness.measures(operation)).toHaveLength(1);
+    expect(await harness.timers()).toEqual({ intervals: 1, deadlines: 1 });
+    await page.clock.runFor(1000);
+    await harness.sendBytes(done.subarray(-1));
+    await harness.close();
+    await expect.poll(() => harness.measures(operation)).toEqual([
+      { name: `manifest.${operation}.first-visible-text`, duration: 5000 },
+      { name: `manifest.${operation}.completed`, duration: 8000 },
+    ]);
+    await expect(streamText(page, operation)).toHaveText(unicodeText);
+    expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
+  });
+
+  for (const sizes of [[1], [7, 2, 19, 1, 5]]) {
+    test(`${operation}: arbitrary byte chunks (${sizes.join(',')}) preserve visible text and timings`, async ({ page, harness }) => {
+      await harness.start(operation);
+      await page.clock.runFor(3000);
+      await harness.sendFrames([
+        { event: 'meta', data: { provenance: harness.venture.provenance } },
+        { event: 'partial', data: unicodePartial(operation) },
+      ], sizes);
+      await expect(streamText(page, operation)).toHaveText(unicodeText);
+      await page.clock.runFor(4000);
+      await harness.sendFrames([
+        { event: 'partial', data: unicodePartial(operation) },
+        { event: 'done', data: streamFinal(harness, operation) },
+      ], sizes);
+      await harness.close();
+      await expect.poll(() => harness.measures(operation)).toEqual([
+        { name: `manifest.${operation}.first-visible-text`, duration: 3000 },
+        { name: `manifest.${operation}.completed`, duration: 7000 },
+      ]);
+      await expect(streamText(page, operation)).toHaveText(unicodeText);
+      expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
+    });
+  }
+
+  test(`${operation}: multiple events in one chunk are consumed in order`, async ({ page, harness }) => {
+    await harness.start(operation);
+    await page.clock.runFor(2000);
+    await harness.sendFrames([
+      { event: 'meta', data: { provenance: harness.venture.provenance } },
+      { event: 'partial', data: unicodePartial(operation, 'Earlier draft') },
+      { event: 'partial', data: unicodePartial(operation) },
+    ]);
+    await expect(streamText(page, operation)).toHaveText(unicodeText);
+    expect(await harness.measures(operation)).toEqual([
+      { name: `manifest.${operation}.first-visible-text`, duration: 2000 },
+    ]);
+    await page.clock.runFor(3000);
+    await harness.sendFrames([
+      { event: 'partial', data: unicodePartial(operation, 'Last draft') },
+      { event: 'done', data: streamFinal(harness, operation) },
+    ]);
+    await harness.close();
+    await expect(streamText(page, operation)).toHaveText(unicodeText);
+    await expect.poll(() => harness.measures(operation)).toEqual([
+      { name: `manifest.${operation}.first-visible-text`, duration: 2000 },
+      { name: `manifest.${operation}.completed`, duration: 5000 },
+    ]);
+    expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
+  });
+
+  for (const failure of ['missing delimiter', 'truncated JSON', 'truncated Unicode', 'fragmented error']) {
+    test(`${operation}: ${failure} stays failed and a fragmented retry completes`, async ({ page, harness }) => {
+      await harness.start(operation);
+      await harness.sendChunks(sseFrame('partial', unicodePartial(operation)), [1, 3, 8]);
+      await expect(streamText(page, operation)).toHaveText(unicodeText);
+      await page.clock.runFor(6000);
+      if (failure === 'fragmented error') {
+        await harness.sendChunks(sseFrame('error', { message: 'Synthetic outage — 水 🌱' }), [1]);
+      } else {
+        const done = Buffer.from(sseFrame('done', streamFinal(harness, operation)));
+        const cut = failure === 'missing delimiter' ? done.length - 1 :
+          failure === 'truncated JSON' ? done.indexOf(Buffer.from('"tagline"')) + 6 :
+          done.indexOf(Buffer.from('🌱')) + 2;
+        await harness.sendBytes(done.subarray(0, cut));
+        await harness.close();
+      }
+      const note = page.locator('.venture > [role=status]');
+      const message = failure === 'fragmented error' ? 'Synthetic outage — 水 🌱' :
+        operation === 'venture' ? 'before completion' : 'stream ended early';
+      await expect(note).toContainText(message);
+      expect(await harness.measures(operation)).toEqual([
+        { name: `manifest.${operation}.first-visible-text`, duration: 0 },
+        { name: `manifest.${operation}.failed`, duration: 6000 },
+      ]);
+      expect(await harness.timers()).toEqual({ intervals: 0, deadlines: 0 });
+      await page.clock.runFor(10000);
+      await expect(note).toContainText(message);
+      expect(await page.evaluate(() => window.__synthetic.requests.length)).toBe(1);
+      await retryStream(page, harness, operation);
+      expect((await harness.measures(operation)).filter(e => e.name.endsWith('.failed'))).toHaveLength(1);
+    });
+  }
+}
 
 for (const operation of ['venture', 'path', 'refinement']) {
   test(`${operation}: elapsed feedback and completion measurements`, async ({ page, harness }) => {

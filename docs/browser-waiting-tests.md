@@ -57,6 +57,11 @@ Checks include:
 - JSON refinement waiting, preservation of the first result and context on
   failure, and enabled retry controls.
 - Persistent early-EOF and provider-error messages after transient toasts expire.
+- Byte-level SSE splits inside JSON keys, UTF-8 characters (2/3/4 bytes) and the
+  final blank-line delimiter, plus one-byte and irregular chunk sizes.
+- Multiple events in one chunk preserve event order and record first text only
+  once; partial JSON/Unicode or an unterminated final frame cannot confirm a
+  result. Fragmented errors persist and manual fragmented retries actually finish.
 - Client watchdog aborts, including a stalled refinement JSON body.
 - Successful completion of a new synthetic retry after each operation times out.
 - Real first-visible-text and completion Performance entries and no duplicate
@@ -67,6 +72,10 @@ Checks include:
   result instead of reopening the abandoned venture.
 
 Run the deterministic helper/recovery checks separately with `npm test`.
+`generation.fixture.cjs` exposes `sendBytes`, `sendChunks(text, sizes)` (cyclic
+positive byte sizes), and `sendFrames(frames, sizes)` (one coalesced chunk when
+sizes are omitted). Text is encoded once before splitting; `sseFrame` formats
+events. These controls retain browser-native decoding and context-wide routing.
 Failure traces are written to ignored `generated-artifacts/browser-results/`.
 Browser downloads default to ignored
 `generated-artifacts/playwright-browsers/`; `PLAYWRIGHT_BROWSERS_PATH` can

@@ -3,6 +3,23 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { venture, installSyntheticRuntime } = require('./synthetic-runtime.cjs');
 
+const sseFrame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+// Encode the whole wire payload once, then partition bytes, not JS characters.
+// A cyclic size list permits deterministic irregular chunks and one-byte chunks.
+function byteChunks(text, sizes) {
+  if (!sizes.length || sizes.some(size => !Number.isSafeInteger(size) || size < 1)) {
+    throw new Error('Chunk sizes must be positive integers');
+  }
+  const bytes = Buffer.from(text, 'utf8'), chunks = [];
+  for (let offset = 0, index = 0; offset < bytes.length; index++) {
+    const end = Math.min(offset + sizes[index % sizes.length], bytes.length);
+    chunks.push(Array.from(bytes.subarray(offset, end)));
+    offset = end;
+  }
+  return chunks;
+}
+
 const test = base.extend({
   harness: async ({ page, context }, use) => {
     const errors = [], unexpected = [];
@@ -130,6 +147,19 @@ const test = base.extend({
       async send(event, data) {
         await page.evaluate(({ event, data }) => window.__synthetic.requests.at(-1).send(event, data), { event, data });
       },
+      async sendBytes(bytes) {
+        await page.evaluate(bytes => window.__synthetic.requests.at(-1).bytes(bytes), Array.from(bytes));
+      },
+      async sendChunks(text, sizes = [1]) {
+        await page.evaluate(chunks => {
+          for (const bytes of chunks) window.__synthetic.requests.at(-1).bytes(bytes);
+        }, byteChunks(text, sizes));
+      },
+      async sendFrames(frames, sizes) {
+        const text = frames.map(({ event, data }) => sseFrame(event, data)).join('');
+        // Without sizes, all events deliberately arrive in a single byte chunk.
+        await this.sendChunks(text, sizes || [Buffer.byteLength(text, 'utf8')]);
+      },
       async close() { await page.evaluate(() => window.__synthetic.requests.at(-1).close()); },
       async json(data, status = 200) {
         await page.evaluate(({ data, status }) => window.__synthetic.requests.at(-1).json(data, status), { data, status });
@@ -150,4 +180,4 @@ const test = base.extend({
   },
 });
 
-module.exports = { test, expect };
+module.exports = { test, expect, sseFrame };
