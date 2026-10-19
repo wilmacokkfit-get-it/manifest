@@ -12,6 +12,17 @@ There are no fake numbers anywhere in this product. Every count you see is a row
 
 ---
 
+## App-building Studio
+
+The **Studio** integrates Scout → Diverge → Build → Autopsy → Mutate into
+MANIFEST, with private project reopening, sandboxed working previews and five
+retained HTML versions. It reuses the existing server-side OpenAI configuration,
+creator identity and Supabase connection. Before enabling it in production,
+apply the additive `supabase/app-studio.sql` migration. See
+[the Studio integration and rollout guide](docs/app-studio.md).
+
+---
+
 ## What is in the box
 
 ```

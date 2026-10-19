@@ -125,6 +125,35 @@
   const app = $('#app');
   const landing = $('#view-landing');
   let activeView = null;   // non-landing view element
+  let studioSeed = null;
+  let studioModule = null;
+  function StudioView(projectId = null) {
+    const placeholder = h('section', { class: 'view venture', 'aria-live': 'polite' },
+      h('p', { text: 'Opening the Studio…' }));
+    const seed = studioSeed; studioSeed = null;
+    let disposed = false;
+    placeholder.cleanup = () => { disposed = true; };
+    if (!studioModule) {
+      const style = h('link', { rel: 'stylesheet', href: 'studio.css?v=1' });
+      document.head.append(style);
+      studioModule = new Promise((resolve, reject) => {
+        const script = h('script', { src: 'studio.js?v=1' });
+        script.onload = resolve;
+        script.onerror = () => { studioModule = null; reject(new Error('The Studio could not load. Please reload.')); };
+        document.head.append(script);
+      });
+    }
+    studioModule.then(() => {
+      if (disposed) return;
+      const view = window.ManifestStudio({ api, h, href, projectId, seed });
+      placeholder.replaceChildren(view);
+      placeholder.className = 'view studio-mount';
+      placeholder.cleanup = () => { disposed = true; view.cleanup(); };
+    }).catch(error => {
+      if (!disposed) placeholder.replaceChildren(h('p', { role: 'alert', text: error.message }));
+    });
+    return placeholder;
+  }
 
   function mount(el, route) {
     if (activeView) { if (typeof activeView.cleanup === 'function') activeView.cleanup(); activeView.remove(); }
@@ -150,6 +179,9 @@
     if (route === '/about') { mount(AboutView(), null); return; }
     if (route === '/architect') { mount(ArchitectView(), '/architect'); return; }
     if (route === '/mix') { mount(MixView(), '/mix'); return; }
+    if (route === '/studio' || route.startsWith('/studio/')) {
+      mount(StudioView(route.slice('/studio/'.length) || null), '/studio'); return;
+    }
     mount(NotFound('No page lives at this address.'), null);
   }
 
@@ -1464,6 +1496,11 @@
 
     function renderActions(v) {
       actions.replaceChildren(...[
+        v.is_owner ? h('button', { class: 'btn primary', text: 'Build an app from this →',
+          'data-testid': 'button-venture-studio', onclick: () => {
+            studioSeed = { idea: `${v.idea || v.name}\n\n${v.description || ''}`.trim().slice(0, 6000), venture_slug: v.slug };
+            go('/studio');
+          } }) : null,
         v.visibility === 'public' ? copyBtn(v, 'Copy share link') : null,
         h('button', { class: 'btn', text: 'Copy summary', onclick: async () => {
           const t = `${v.name}\n${v.tagline}\n\n${v.description}\n\nProvenance ${v.provenance.code}\n${shareUrl(v.slug)}`;
