@@ -231,7 +231,7 @@ async def _identity_cookie(request: Request, call_next):
     if not token or len(token) < 16:
         token, fresh = new_token(), True
     request.state.owner = token
-    if request.url.path.startswith(("/api/manifest", "/api/mix/", "/api/ventures/", "/api/venture-images/", "/renders/")):
+    if request.url.path.startswith(("/api/manifest", "/api/mix/", "/api/studio/", "/api/ventures/", "/api/venture-images/", "/renders/")):
         request.state.app_owner_token = await app_owner_token(request)
     response = await call_next(request)
     if fresh:
@@ -1378,6 +1378,13 @@ class CombineBody(BaseModel):
     custom_ideas: list[str] = Field(default_factory=list, max_length=3)
 
 
+from app.studio import create_router as create_studio_router
+
+# Reuse verified owner identity, existing database, and existing provider quotas.
+# The lambda deliberately resolves the current store (including isolated tests).
+app.include_router(create_studio_router(lambda: store, _owner_token, _is_creator, _mix_rate))
+
+
 @app.get("/api/mix/floor")
 async def mix_floor():
     return {"ventures": [mixer.floor_brief(v) for v in await store.list_public(80)
@@ -1610,6 +1617,8 @@ def _shell(og: dict | None = None) -> str:
 @app.get("/about", response_class=HTMLResponse)
 @app.get("/architect", response_class=HTMLResponse)
 @app.get("/mix", response_class=HTMLResponse)
+@app.get("/studio", response_class=HTMLResponse)
+@app.get("/studio/{project_id}", response_class=HTMLResponse)
 async def index():
     return _shell()
 
