@@ -46,7 +46,9 @@ manifest/
   .env.example           Every setting, explained
 ```
 
-Run command, everywhere: `uvicorn server:app --host 0.0.0.0 --port 8000`
+Local run command: `uvicorn server:app --host 0.0.0.0 --port 8000`.
+Replit Run and deployment use the command in `.replit`:
+`python -m uvicorn server:app --host 0.0.0.0 --port 5000`.
 
 ---
 
@@ -103,11 +105,12 @@ Want Claude writing the text instead? Add `ANTHROPIC_API_KEY`, set `LLM_PROVIDER
 ### 6. Deploy so people can use it
 
 1. Click **Deploy** (top right) → **Autoscale**. Autoscale sleeps when nobody is there, so it is the cheap option.
-2. Leave the run command as `uvicorn server:app --host 0.0.0.0 --port 8000`. Deploy.
+2. Keep the `.replit` run and deployment command:
+   `python -m uvicorn server:app --host 0.0.0.0 --port 5000`. Deploy.
 3. Copy the `.replit.app` address it gives you, paste it into the `PUBLIC_URL` secret, and click **Redeploy** once so share links and link-preview cards use the right address.
 4. Send the link. Ventures, the Floor, signals, paths, asks and offers all work. The Floor starts empty, and the first venture on it will be real.
 
-**About the database.** By default everything is saved in a SQLite file inside the Repl (`data/manifest.db`). That survives restarts and redeploys on Replit as long as you do not delete the folder, and it is fine for hundreds of ventures. When you want the durable option, add `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` as secrets and run the v2 migration described below.
+**About the database.** Local development defaults to a SQLite file (`data/manifest.db`). The Replit configuration uses `STORE=supabase`; configure `SUPABASE_URL` and the server-only `SUPABASE_SECRET_KEY` (or legacy `SUPABASE_SERVICE_ROLE_KEY`) before deploying. Studio additionally requires the additive `supabase/app-studio.sql` migration; see [the Studio deployment checklist](docs/app-studio.md#production-rollout-checklist).
 
 ---
 

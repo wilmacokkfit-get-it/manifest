@@ -36,7 +36,8 @@ async function harness(page, context) {
         const body = req.postDataJSON();
         const p = { id: body.id, idea: body.idea, venture_slug: body.venture_slug, revision: 0,
           created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-          payload: { matches: [], directions: [], selected_id: null, versions: [], cursor: -1, autopsy: 'none', operation: null, error: null } };
+          payload: { requirements: body.requirements || '', matches: [], directions: [],
+            selected_id: null, versions: [], cursor: -1, autopsy: 'none', operation: null, error: null } };
         projects.set(p.id, p);
         return route.fulfill({ json: p });
       }
@@ -56,6 +57,7 @@ async function harness(page, context) {
       p.payload.error = null;
       if (kind === 'scout') { p.payload.matches = matches; p.payload.researched_at = new Date().toISOString(); }
       if (kind === 'diverge') p.payload.directions = directions;
+      if (kind === 'selection') p.payload.selected_id = body.direction_id;
       if (kind === 'build') { p.payload.selected_id = body.direction_id; p.payload.autopsy = 'pending'; addVersion(p, 'Initial build'); }
       if (kind === 'autopsy') { p.payload.autopsy = 'complete'; addVersion(p, 'Autopsy fixes', [{ category: 'state', issue: 'Missing state fixture', fixed: 'Added the missing state fixture.' }]); }
       if (kind === 'mutate') addVersion(p, body.change);
@@ -108,6 +110,12 @@ test('complete workflow, sandbox, live preview interaction, mutation, undo, relo
   await expect(frame.getByRole('heading')).toContainText('Make the count amber');
   await page.getByTestId('button-undo').click();
   await expect(frame.getByRole('heading')).toContainText('Autopsy fixes');
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByTestId('button-download').click(),
+  ]);
+  expect(download.suggestedFilename()).toBe('manifest-app-v2.html');
+  expect(readFileSync(await download.path(), 'utf8')).toContain('Autopsy fixes (QA fixture only)');
   const projectUrl = page.url();
   const count = qa.calls.filter(c => c.endsWith('/mutate')).length;
   await page.reload();
@@ -142,6 +150,22 @@ test('autopsy and mutation failures retain the app, show clear errors, and can r
   await expect(page.getByTestId('input-studio-change')).toHaveValue('A change that fails');
   await page.getByTestId('button-mutate').click();
   await expect(frame.getByRole('heading')).toContainText('A change that fails');
+  expect(qa.errors).toEqual([]);
+});
+
+test('explicit requirements persist and the original idea can be built unchanged', async ({ page, context }) => {
+  const qa = await harness(page, context);
+  await page.getByTestId('input-studio-idea').fill('A useful, focused app for organizing neighborhood tool sharing');
+  await page.getByTestId('input-studio-requirements').fill('Keyboard accessible; no account required.');
+  await page.getByTestId('button-scout').click();
+  await expect(page.getByTestId('button-direction-original')).toBeVisible();
+  await page.getByTestId('button-direction-original').click();
+  await expect(page.getByTestId('button-direction-original')).toHaveAttribute('aria-pressed', 'true');
+  await page.getByTestId('button-build').click();
+  await expect(page.getByTestId('list-studio-fixes')).toBeVisible();
+  const project = [...qa.projects.values()][0];
+  expect(project.payload.requirements).toBe('Keyboard accessible; no account required.');
+  expect(project.payload.selected_id).toBe('original');
   expect(qa.errors).toEqual([]);
 });
 

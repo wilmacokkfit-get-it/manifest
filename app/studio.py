@@ -34,6 +34,8 @@ The app runs in an iframe with sandbox="allow-scripts" ONLY. No same-origin,
 parent access, localStorage, sessionStorage, IndexedDB, cookies, popups, alert,
 confirm, prompt, clipboard, fullscreen, payment collection or credentials.
 Keep user data only in memory; explicitly explain that preview data resets.
+Honor every explicit user requirement unless it needs an unavailable service;
+disclose that limitation in the app rather than simulating success.
 No crypto, tokens, wallets, autonomous spending or self-replication.
 Respect the user's actual purpose. Do not turn every idea into a generic dashboard
 or landing page. Implement empty, invalid-input, success and reset states where
@@ -82,13 +84,14 @@ class Fix(StrictModel):
 class CreateBody(StrictModel):
     id: uuid.UUID
     idea: str = Field(min_length=8, max_length=6000)
+    requirements: str = Field(default="", max_length=6000)
     venture_slug: str | None = Field(default=None, max_length=80)
 
 
 class OperationBody(StrictModel):
     request_id: uuid.UUID
     revision: int = Field(ge=0)
-    direction_id: Literal["a", "b", "c"] | None = None
+    direction_id: Literal["a", "b", "c", "original"] | None = None
     change: str = Field(default="", max_length=6000)
 
 
@@ -97,17 +100,34 @@ class RestoreBody(StrictModel):
     version_id: uuid.UUID
 
 
+class SelectionBody(StrictModel):
+    revision: int = Field(ge=0)
+    direction_id: Literal["a", "b", "c", "original"]
+
+
 class _DocumentInspector(HTMLParser):
     """Reject documents that cannot stay self-contained inside this sandbox."""
-    def __init__(self):
+    def __init__(self, source: str):
         super().__init__()
+        self.line_offsets = [0]
+        for line in source.splitlines(keepends=True):
+            self.line_offsets.append(self.line_offsets[-1] + len(line))
         self.seen = set()
+        self.head_end = None
+        self.policy_spans = []
 
     def handle_starttag(self, tag, attrs):
         if tag not in {"html", "head"} and "head" not in self.seen:
             raise ValueError("The AI returned content before the document head.")
         self.seen.add(tag)
         values = dict(attrs)
+        line, column = self.getpos()
+        start = self.line_offsets[line - 1] + column
+        starttag = self.get_starttag_text()
+        if tag == "head" and self.head_end is None:
+            self.head_end = start + len(starttag)
+        if tag == "meta" and "data-manifest-policy" in values:
+            self.policy_spans.append((start, start + len(starttag)))
         if tag in {"iframe", "frame", "object", "embed", "base"}:
             raise ValueError("The AI returned an unsupported embedded resource.")
         if tag == "meta" and values.get("http-equiv", "").lower() == "refresh":
@@ -135,16 +155,17 @@ def validate_html(raw: str) -> str:
             or not re.search(r"</body\s*>", html, re.I)
             or not re.search(r"</html\s*>\s*$", html, re.I)):
         raise ValueError("The AI returned an incomplete HTML app.")
-    inspector = _DocumentInspector()
+    inspector = _DocumentInspector(html)
     inspector.feed(html)
-    if not {"html", "head", "body"} <= inspector.seen:
+    if not {"html", "head", "body"} <= inspector.seen or inspector.head_end is None:
         raise ValueError("The AI returned an incomplete HTML structure.")
     # CSP is not a static template or AI result: it is the server's isolation
     # boundary, inserted before any model-supplied resource or script.
-    html = re.sub(r'<meta\s+[^>]*data-manifest-policy[^>]*>', "", html, flags=re.I)
-    return re.sub(r"<head(\s[^>]*)?>",
-                  lambda m: m.group(0) + f'<meta data-manifest-policy http-equiv="Content-Security-Policy" content="{POLICY}">',
-                  html, count=1, flags=re.I)
+    for start, end in reversed(inspector.policy_spans):
+        html = html[:start] + html[end:]
+    return (html[:inspector.head_end]
+            + f'<meta data-manifest-policy http-equiv="Content-Security-Policy" content="{POLICY}">'
+            + html[inspector.head_end:])
 
 
 async def _response(instructions: str, data: dict, *, search=False, tokens=14000):
@@ -191,7 +212,8 @@ summary 250 characters (the parser permits a little extra). Aim for four matches
 async def diverge(project: dict) -> list[dict]:
     result = await _response("""Propose exactly three directions for a single-file
 browser app that deliberately differ from the supplied existing tools and from
-each other. Preserve the original idea's intended use. Change the core interaction,
+each other. Preserve the original idea's intended use and every explicit
+requirement. Change the core interaction,
 constraint, audience or workflow, not merely colors, names or an added AI chatbot.
 Each must be feasible with inline HTML/CSS/JS and no backend or storage. If the idea
 needs physical work or remote services, propose an honest useful local companion,
@@ -205,7 +227,8 @@ In each difference name at least one supplied tool and compare the actual
 mechanism plainly. Keep the text compact: title under 70 characters, pitch
 under 240 characters, and difference under 300 characters. Do not output the
 example placeholder strings; write three complete idea-specific choices.""",
-                             {"idea": project["idea"], "matches": project["payload"]["matches"]}, tokens=4000)
+                             {"idea": project["idea"], "requirements": project["payload"].get("requirements", ""),
+                              "matches": project["payload"]["matches"]}, tokens=4000)
     items = parse_object(result.output_text).get("directions", [])
     directions = [Direction.model_validate(item).model_dump() for item in items]
     if len(directions) != 3 or {d["id"] for d in directions} != {"a", "b", "c"}:
@@ -217,8 +240,21 @@ example placeholder strings; write three complete idea-specific choices.""",
 
 def brief(project: dict) -> dict:
     payload = project["payload"]
-    direction = next(d for d in payload["directions"] if d["id"] == payload["selected_id"])
-    return {"idea": project["idea"], "direction": direction, "matches": payload["matches"]}
+    if payload["selected_id"] == "original":
+        direction = {
+            "id": "original",
+            "title": "Original idea",
+            "pitch": project["idea"],
+            "difference": "Build the requested app directly, without introducing a new direction.",
+        }
+    else:
+        direction = next(d for d in payload["directions"] if d["id"] == payload["selected_id"])
+    return {
+        "idea": project["idea"],
+        "requirements": payload.get("requirements", ""),
+        "direction": direction,
+        "matches": payload["matches"],
+    }
 
 
 async def build(project: dict) -> str:
@@ -391,7 +427,8 @@ def create_router(store_getter, owner_getter, creator_check, rate_limit):
         row = await StudioStore(store).create({
             "id": str(body.id), "owner_token": owner_getter(request), "idea": body.idea,
             "venture_slug": body.venture_slug, "created_at": timestamp, "updated_at": timestamp,
-            "revision": 0, "payload": {"matches": [], "directions": [], "selected_id": None,
+            "revision": 0, "payload": {"requirements": body.requirements, "matches": [],
+                                     "directions": [], "selected_id": None,
                                      "versions": [], "cursor": -1, "autopsy": "none",
                                      "operation": None, "error": None},
         })
@@ -412,6 +449,23 @@ def create_router(store_getter, owner_getter, creator_check, rate_limit):
     async def get_project(project_id: uuid.UUID, request: Request):
         _, row = await owned(project_id, request)
         return public_project(row)
+
+    @router.post("/projects/{project_id}/selection")
+    async def select_direction(project_id: uuid.UUID, body: SelectionBody, request: Request):
+        storage, row = await owned(project_id, request)
+        payload = copy.deepcopy(row["payload"])
+        if row["revision"] != body.revision or pending(payload) or payload["versions"]:
+            raise HTTPException(409, "This project changed or has already been built. Reopen it before choosing.")
+        valid = bool(payload["matches"] and payload["directions"])
+        valid = valid and (body.direction_id == "original" or
+                           any(d["id"] == body.direction_id for d in payload["directions"]))
+        if not valid:
+            raise HTTPException(409, "Scout and Diverge must finish before choosing a direction.")
+        payload.update(selected_id=body.direction_id, error=None)
+        result = await storage.compare(row, payload)
+        if not result:
+            raise HTTPException(409, "Another change won. Reopen the project.")
+        return public_project(result)
 
     @router.post("/projects/{project_id}/restore")
     async def restore(project_id: uuid.UUID, body: RestoreBody, request: Request):
@@ -442,8 +496,11 @@ def create_router(store_getter, owner_getter, creator_check, rate_limit):
         if kind == "diverge" and (not payload["matches"] or payload["versions"] or payload["directions"]):
             raise HTTPException(409, "Scout first, then choose a direction.")
         if kind == "build":
-            if payload["versions"] or not any(d["id"] == body.direction_id for d in payload["directions"]):
-                raise HTTPException(409, "Choose one of this project's three directions before building.")
+            if payload["versions"] or not payload["directions"] or (
+                body.direction_id != "original"
+                and not any(d["id"] == body.direction_id for d in payload["directions"])
+            ):
+                raise HTTPException(409, "Choose one of the directions or keep your original idea before building.")
             payload["selected_id"] = body.direction_id
         if kind in ("autopsy", "mutate") and not payload["versions"]:
             raise HTTPException(409, "Build an app first.")

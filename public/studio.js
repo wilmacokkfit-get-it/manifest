@@ -5,7 +5,8 @@
   window.ManifestStudio = function ({ api, h, href, projectId, seed }) {
     const root = h('section', { class: 'app-studio', 'data-testid': 'studio' });
     let project = null, busy = null, error = '', disposed = false, poll = null;
-    let idea = seed?.idea || '', change = '', selected = null, projects = null, libraryOpen = false;
+    let idea = seed?.idea || '', requirements = seed?.requirements || '';
+    let change = '', selected = null, projects = null, libraryOpen = false;
     const controller = new AbortController();
     const labels = {
       scout: 'Searching the web for the closest tools.',
@@ -31,6 +32,7 @@
       if (disposed) return;
       project = result;
       idea = result.idea;
+      requirements = result.payload.requirements || '';
       selected = result.payload.selected_id || selected;
       history.replaceState({}, '', href(`/studio/${project.id}`));
       paint();
@@ -77,7 +79,8 @@
         busy = 'saving'; error = ''; paint();
         try {
           apply(await call('/api/studio/projects', {
-            id: crypto.randomUUID(), idea: idea.trim(), venture_slug: seed?.venture_slug || null,
+            id: crypto.randomUUID(), idea: idea.trim(), requirements: requirements.trim(),
+            venture_slug: seed?.venture_slug || null,
           }));
         } catch (err) { error = err.message; busy = null; paint(); return; }
         busy = null;
@@ -95,6 +98,22 @@
       catch (err) { error = err.message; await refresh(); }
       finally { busy = null; paint(); }
     }
+    async function selectDirection(id) {
+      if (busy || isPending() || project.payload.versions.length) return;
+      if (project.payload.selected_id === id) return;
+      selected = id;
+      busy = 'saving';
+      error = '';
+      paint();
+      try {
+        apply(await call(`/api/studio/projects/${project.id}/selection`, {
+          revision: project.revision, direction_id: id,
+        }));
+      } catch (err) {
+        error = err.message;
+        await refresh();
+      } finally { busy = null; paint(); }
+    }
     function section(title, subtitle, ...content) {
       return h('section', { class: 'studio-section' },
         h('div', { class: 'studio-section-head' }, h('h2', { text: title }), note(subtitle)), ...content);
@@ -106,7 +125,9 @@
       const pending = isPending();
       const disabled = !!busy || !!pending;
       const current = p?.versions[p.cursor];
-      const direction = p?.directions.find(d => d.id === (p.selected_id || selected));
+      const selectedId = selected || p?.selected_id;
+      const direction = p?.directions.find(d => d.id === selectedId) ||
+        (selectedId === 'original' ? { title: 'Original idea' } : null);
       const status = busy ? labels[busy] || (busy === 'loading' ? 'Opening your saved project.' : busy === 'restoring' ? 'Restoring your saved version.' : 'Saving your project.') : pending
         ? `${labels[p.operation.kind]} The server is still working; this view checks its saved result.`
         : project ? 'Project and retained versions saved privately.' : 'Private by default. Built for your intended use.';
@@ -145,10 +166,16 @@
         'data-testid': 'input-studio-idea', placeholder: 'An idea that deserves something made for it…',
         disabled: disabled || !!project, oninput: e => { idea = e.target.value; submit.disabled = disabled || idea.trim().length < 8; } });
       input.value = idea;
+      const requirementsInput = h('textarea', { id: 'studio-requirements', maxlength: '6000', rows: '2',
+        'data-testid': 'input-studio-requirements', placeholder: 'Accessibility, required actions, constraints…',
+        disabled: disabled || !!project, oninput: e => { requirements = e.target.value; } });
+      requirementsInput.value = requirements;
       const submit = h('button', { class: 'btn primary', type: 'submit', text: 'Breathe Life →',
         'data-testid': 'button-scout', disabled: disabled || idea.trim().length < 8 || !!p?.matches.length });
       children.push(h('form', { class: 'studio-prompt', onsubmit: e => { e.preventDefault(); scout(); } },
         h('label', { for: 'studio-idea', class: 'sr-only', text: 'Describe the app you want to create' }), input,
+        h('label', { for: 'studio-requirements', class: 'studio-requirements-label', text: 'Non-negotiable requirements (optional)' }),
+        requirementsInput,
         h('div', { class: 'studio-prompt-bottom' }, note(project && !p.matches.length ? 'Retry this saved idea, or start a new one.' : 'First, see what already exists.'), submit)));
       if (p?.matches.length) {
         children.push(section('SCOUT', `The closest matches from live web search · ${new Date(p.researched_at).toLocaleDateString()}. AI-ranked, not exhaustive.`,
@@ -159,12 +186,20 @@
       }
       if (p?.directions.length) {
         children.push(section('DIVERGE', 'Three different mechanisms, not three coats of paint. Choose one.',
-          h('div', { class: 'studio-directions' }, ...p.directions.map(d =>
-            button('', `button-direction-${d.id}`, () => { selected = d.id; paint(); }, disabled || !!current))),
+          h('div', { class: 'studio-directions' }, ...[
+            ...p.directions,
+            { id: 'original', title: 'Keep my original idea', pitch: project.idea,
+              difference: 'Build the requested app directly, without introducing a new direction.' },
+          ].map(d => button('', `button-direction-${d.id}`, () => selectDirection(d.id), disabled || !!current))),
           !current ? h('div', { class: 'studio-build-action' }, note('Your choice becomes one complete, working HTML app.'),
             button('Build this direction →', 'button-build', build, disabled || !selected, true)) : null));
         const options = children.at(-1).querySelector('.studio-directions');
-        p.directions.forEach((d, i) => {
+        const choices = [
+          ...p.directions,
+          { id: 'original', title: 'Keep my original idea', pitch: project.idea,
+            difference: 'Build the requested app directly, without introducing a new direction.' },
+        ];
+        choices.forEach((d, i) => {
           const option = options.children[i]; option.className = 'studio-direction' + ((selected || p.selected_id) === d.id ? ' selected' : '');
           option.setAttribute('aria-pressed', String((selected || p.selected_id) === d.id));
           option.append(h('span', { class: 'studio-direction-index', text: d.id.toUpperCase() }),
@@ -186,6 +221,15 @@
       children.push(section('THE CANVAS', direction?.title || 'One chosen direction. One creation.', canvas,
         current ? note(`Version ${p.cursor + 1} of ${p.versions.length} retained. Scripts run in an isolated iframe with no same-origin access to MANIFEST.`) : null));
       if (current) {
+        const downloadHtml = () => {
+          const file = new Blob([current.html], { type: 'text/html;charset=utf-8' });
+          const url = URL.createObjectURL(file);
+          const anchor = h('a', { href: url, download: `manifest-app-v${p.cursor + 1}.html` });
+          document.body.append(anchor);
+          anchor.click();
+          anchor.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        };
         const report = current.label === 'Autopsy fixes' ? current :
           p.versions.slice(0, p.cursor + 1).filter(v => v.label === 'Autopsy fixes').at(-1);
         children.push(section('AUTOPSY', 'A second AI pass: generic design, broken features, missing states.',
@@ -205,8 +249,9 @@
         const mutateButton = h('button', { class: 'btn primary', type: 'submit', text: 'Mutate →',
           'data-testid': 'button-mutate', disabled: disabled || !change.trim() });
         children.push(section('MUTATE', 'Keep what works. Change what does not.',
-          h('div', { class: 'studio-version-actions' }, button('Undo', 'button-undo',
-            () => restore(p.versions[p.cursor - 1].id), disabled || p.cursor <= 0)),
+          h('div', { class: 'studio-version-actions' },
+            button('Download HTML', 'button-download', downloadHtml),
+            button('Undo', 'button-undo', () => restore(p.versions[p.cursor - 1].id), disabled || p.cursor <= 0)),
           h('form', { class: 'studio-prompt', onsubmit: e => { e.preventDefault(); if (change.trim()) run('mutate'); } },
             h('label', { for: 'studio-change', class: 'sr-only', text: 'Describe your change request' }), mutation,
             h('div', { class: 'studio-prompt-bottom' }, note('Current HTML + your words. Full updated app returned.'), mutateButton)),

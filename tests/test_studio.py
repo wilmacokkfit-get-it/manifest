@@ -40,6 +40,14 @@ class DocumentTests(unittest.TestCase):
     def test_fenced_document_is_normalized(self):
         self.assertTrue(studio.validate_html("```html\n" + HTML + "\n```").startswith("<!DOCTYPE html>"))
 
+    def test_policy_is_inserted_in_the_real_head_not_a_comment(self):
+        source = HTML.replace("<head>", "<!-- fake <head> --> <head>")
+        rendered = studio.validate_html(source)
+        actual_head = rendered.index("<head>", rendered.index("-->"))
+        policy = rendered.index("data-manifest-policy")
+        self.assertGreater(policy, actual_head)
+        self.assertLess(policy, rendered.index("<style>"))
+
     def test_incomplete_external_or_navigation_documents_fail(self):
         bad = [
             HTML[:-7], "", None,
@@ -105,10 +113,22 @@ class ProviderValidationTests(unittest.IsolatedAsyncioTestCase):
         directions = copy.deepcopy(DIRECTIONS)
         directions[1]["difference"] = "A comparison with a real mechanism. " * 20
         response = SimpleNamespace(output_text=json.dumps({"directions": directions}))
-        with patch.object(studio, "_response", AsyncMock(return_value=response)):
-            result = await studio.diverge({"idea": "test idea", "payload": {"matches": MATCHES}})
+        with patch.object(studio, "_response", AsyncMock(return_value=response)) as call:
+            result = await studio.diverge({"idea": "test idea", "payload": {
+                "requirements": "Must work offline.", "matches": MATCHES}})
         self.assertEqual(result[1]["difference"], directions[1]["difference"].strip())
         self.assertGreater(len(result[1]["difference"]), 600)
+        self.assertEqual(call.call_args.args[1]["requirements"], "Must work offline.")
+
+    def test_original_direction_retains_idea_and_requirements_in_build_brief(self):
+        project = {"idea": "A very specific app idea", "payload": {
+            "requirements": "Keyboard accessible; no account required.",
+            "matches": MATCHES, "directions": DIRECTIONS, "selected_id": "original",
+        }}
+        result = studio.brief(project)
+        self.assertEqual(result["direction"]["id"], "original")
+        self.assertEqual(result["direction"]["pitch"], project["idea"])
+        self.assertEqual(result["requirements"], project["payload"]["requirements"])
 
     async def test_build_and_mutate_pass_actual_html_and_direction(self):
         payload = studio.append_version({"versions": [], "cursor": -1, "matches": MATCHES,
@@ -145,8 +165,9 @@ class StudioAPITests(unittest.IsolatedAsyncioTestCase):
         self.store_patch.stop(); self.env.stop()
         self.store._db.close(); self.temp.cleanup()
 
-    async def create(self):
-        body = {"id": str(uuid.uuid4()), "idea": "An app for meaningful little counters"}
+    async def create(self, requirements=""):
+        body = {"id": str(uuid.uuid4()), "idea": "An app for meaningful little counters",
+                "requirements": requirements}
         r = await self.client.post("/api/studio/projects", json=body)
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()
@@ -194,6 +215,33 @@ class StudioAPITests(unittest.IsolatedAsyncioTestCase):
             # Replit forwards client-supplied visitor headers: do not trust them.
             self.assertEqual((await stranger.get(f"/api/studio/projects/{p['id']}", headers={
                 "X-Visitor-Id": self.client.cookies.get(server.COOKIE)})).status_code, 404)
+
+    async def test_original_choice_and_explicit_requirements_are_saved_through_build(self):
+        project = await self.create("Keyboard accessible; no account required.")
+        self.assertEqual(project["payload"]["requirements"], "Keyboard accessible; no account required.")
+        with patch.object(studio, "scout", AsyncMock(return_value={"matches": MATCHES, "researched_at": "2026-10-19T00:00:00Z"})):
+            project = (await self.op(project, "scout")).json()
+        with patch.object(studio, "diverge", AsyncMock(return_value=DIRECTIONS)):
+            project = (await self.op(project, "diverge")).json()
+        selection = await self.client.post(f"/api/studio/projects/{project['id']}/selection", json={
+            "revision": project["revision"], "direction_id": "original"})
+        self.assertEqual(selection.status_code, 200, selection.text)
+        project = selection.json()
+        self.assertEqual(project["payload"]["selected_id"], "original")
+        seen = {}
+
+        async def build_original(received):
+            seen.update(studio.brief(received))
+            return studio.validate_html(HTML)
+
+        with patch.object(studio, "build", AsyncMock(side_effect=build_original)):
+            response = await self.op(project, "build", direction_id="original")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["payload"]["selected_id"], "original")
+        self.assertEqual(seen["direction"]["pitch"], project["idea"])
+        self.assertEqual(seen["requirements"], "Keyboard accessible; no account required.")
+        reopened = await self.client.get(f"/api/studio/projects/{project['id']}")
+        self.assertEqual(reopened.json()["payload"]["requirements"], "Keyboard accessible; no account required.")
 
     async def test_provider_failure_keeps_app_and_all_versions(self):
         p = await self.built()
@@ -264,6 +312,8 @@ class StudioAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.op(p, "build", direction_id="a")).status_code, 409)
         self.assertEqual((await self.op(p, "diverge")).status_code, 409)
         self.assertEqual((await self.op(p, "mutate", change="")).status_code, 409)
+        self.assertEqual((await self.client.post(f"/api/studio/projects/{p['id']}/selection", json={
+            "revision": p["revision"], "direction_id": "original"})).status_code, 409)
         self.assertEqual((await self.client.post("/api/studio/projects", json={
             "id": str(uuid.uuid4()), "idea": "Valid idea input", "owner_token": "forged",
         })).status_code, 422)

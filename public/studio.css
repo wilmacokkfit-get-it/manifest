@@ -19,6 +19,7 @@
 .studio-prompt textarea{width:100%;display:block;border:none;background:transparent;resize:vertical;color:var(--fg);font:inherit;font-size:var(--studio-base);line-height:1.7;min-height:80px;padding:0;outline:none}
 .studio-prompt:focus-within{border-color:var(--accent)}
 .studio-prompt textarea::placeholder{color:var(--studio-muted);opacity:1}
+.studio-requirements-label{display:block;margin-top:18px;font-size:var(--studio-xs);color:var(--studio-muted)}
 .studio-prompt textarea:disabled{opacity:.8}
 .studio-prompt-bottom{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-top:16px}
 .studio-note{font-size:var(--studio-xs);line-height:1.7;color:var(--studio-muted);margin:0}

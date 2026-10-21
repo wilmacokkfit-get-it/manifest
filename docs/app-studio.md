@@ -7,8 +7,8 @@ authentication, or provenance records. The existing dark palette and fonts remai
 ## Flow
 
 - **Scout:** an actual server-side OpenAI web-search call returns 3–5 close existing tools. Each has a one-line description, a product link, and search evidence. The server checks the evidence URL against the provider's returned citation metadata. Missing sources, malformed output, or provider failure produce a clear error, not invented matches.
-- **Diverge:** a separate AI call proposes exactly three directions. Each includes a one-sentence pitch and a plain comparison with supplied existing tools. The user explicitly chooses one.
-- **Build:** a real OpenAI Responses call returns a complete self-contained HTML app. The draft is saved before review.
+- **Diverge:** a separate AI call proposes exactly three directions. Each includes a one-sentence pitch and a plain comparison with supplied existing tools. The user can choose one or keep the original idea. Optional non-negotiable requirements are saved with the project and passed to Diverge, Build, Autopsy and Mutate.
+- **Build:** a real OpenAI Responses call returns a complete self-contained HTML app. The draft is saved before review, shown in an isolated preview and downloadable as HTML.
 - **Autopsy:** a distinct second AI pass receives the actual build, critiques generic design, features and missing states, applies fixes, and returns the full app with a short fixes list. The UI describes this as static AI code review, not executed browser testing.
 - **Mutate:** the server loads the selected current HTML and sends it with the change request. Only a valid full HTML response becomes a new version. Undo changes the saved current-version cursor. Selecting an earlier version and mutating creates a new branch; later versions on the old branch are discarded. The latest five versions, including the initial build and corrected build, are retained.
 
@@ -24,19 +24,36 @@ creator cookie and optional verified app-owner account. It deliberately does not
 trust a caller-supplied `X-Visitor-Id` as identity. Source and version history are
 never added to the public Floor or venture payloads.
 
-## Production rollout
+## Production rollout checklist
 
-1. Review and apply `supabase/app-studio.sql` to the **same Supabase project**
-   already configured for MANIFEST. It only creates the private `app_projects`
-   table and its index; no existing rows are changed.
-2. Deploy this branch to the existing Replit app using its normal deployment
-   process. No new frontend framework or npm build is required.
-3. Existing `OPENAI_API_KEY`, `SUPABASE_URL`, and `SUPABASE_SECRET_KEY` or legacy
-   `SUPABASE_SERVICE_ROLE_KEY` are reused. Optionally set `STUDIO_MODEL` to an
-   OpenAI Responses model that supports web search. Otherwise `LLM_MODEL`, then
-   `gpt-5-mini`, is used. Keep all keys server-side.
-4. Open `/studio`; test real research, choice, build, review, mutation, undo and
-   reload. Verify a second creator cannot read the project.
+- [ ] **Migration ordering:** retain the existing MANIFEST schema and data. If the
+  documented `supabase/migration.sql` v1–v3 schema is not already installed,
+  apply its required legacy additions first. Then review and apply
+  `supabase/app-studio.sql` to the **same Supabase project**. The Studio
+  migration only adds the private `app_projects` table and index; it does not
+  change existing rows. No migration was run against production for this work.
+- [ ] **Environment:** set server-only `OPENAI_API_KEY`, `SUPABASE_URL`, and
+  either `SUPABASE_SECRET_KEY` or legacy `SUPABASE_SERVICE_ROLE_KEY`. Optionally
+  set `STUDIO_MODEL` to an OpenAI Responses model supporting web search;
+  otherwise `LLM_MODEL`, then `gpt-5-mini`, is used. Never expose the Supabase
+  privileged key or OpenAI key to the browser. `STUDIO_ALLOW_LOCAL=1` is only
+  for disposable local tests and must not replace production Supabase.
+- [ ] **Build/check:** this repository has no frontend compilation step; the
+  Replit production command in `.replit` is
+  `python -m uvicorn server:app --host 0.0.0.0 --port 5000`. Run
+  `python -m compileall -q server.py app` and `npm test` before deployment.
+- [ ] **Redeploy:** deploy the reviewed code through the existing Replit
+  deployment workflow. This repository change does not deploy or change
+  production settings.
+- [ ] **Authenticated verification:** sign in using the existing MANIFEST
+  authentication, open `/studio`, and verify live Scout sources, direction and
+  original-idea selection, requirements, Build, Autopsy, Mutate, Undo, reload,
+  and project reopening. Verify a different creator cannot list or read the
+  project. Confirm Scout fails visibly if native search citations are absent.
+- [ ] **Rollback:** redeploy the previous application revision if needed. The
+  additive table can remain unused; rolling back the app does not require
+  deleting it. Do not drop `app_projects` unless its private projects and HTML
+  history have been exported and data loss is approved.
 
 If the table or Supabase connection is unavailable, Studio fails clearly and
 does **not** save to a local fallback. Existing MANIFEST pages remain usable.
